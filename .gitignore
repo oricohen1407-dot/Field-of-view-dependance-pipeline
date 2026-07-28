@@ -217,8 +217,12 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Outputs
 debug/
 mask_fit_outputs/
 phase_retrieval_outputs/
 phase_retrieval_with_displacement_iteration/
 PSFs.jpg
+
+# Config
+config.json

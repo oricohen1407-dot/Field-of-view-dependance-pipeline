@@ -7,6 +7,7 @@
 # 2. pip install -r requirements.txt
 # 3. python main.py
 
+import argparse
 import os
 from pathlib import Path
 from config.config import Config, UserConfig
@@ -14,6 +15,7 @@ from config.emitter_centers import (
     ZSTACK_FILE, CENTRAL_BEAD_COORDINATES_PIXEL, OFFAXIS_ZSTACK_FILES, OFFAXIS_COORDS_PIXEL, RAW_IMAGE_FOLDER
 )
 from func_utils import characterize_PSF
+from gui import build_demo
 
 # TODO (RK): Delete and remove import if unnecessary
 # Avoid GUI backends on a headless server
@@ -41,5 +43,15 @@ def run_characterize_PSF():
     cfg.save(str(PROJECT_DIR / "config" / "config.json"))
 
 
+def main():
+    parser = argparse.ArgumentParser(description="DeepSTORM3D PSF characterization")
+    parser.add_argument("--no-gui", action="store_true", help="Run headlessly without opening the browser GUI")
+    args = parser.parse_args()
+    if args.no_gui:
+        run_characterize_PSF()
+    else:
+        build_demo().launch()
+
+
 if __name__ == "__main__":
-    run_characterize_PSF()
+    main()

@@ -12,50 +12,23 @@ class ImModel_pr(torch.nn.Module):
         a scalar model for air or oil objective in microscopy
         """
         super().__init__()
-        device = params['device']
-        # ori's edit
-        device = torch.device(
-            "cuda:3" if torch.cuda.is_available() else "cpu")  # GPU device cuda:0, cuda:1, cuda:2 or cuda:3
-        print(f'device used: {device}')
-        # end ori's edit
-        ################### set parameters: unit:um
-        # oil objective
-        M = params['M']  # magnification
-        NA = params['NA']  # NA
-        n_immersion = params['n_immersion']  # refractive index of the immersion of the objective
-        lamda = params['lamda']  # wavelength
-        n_sample = params['n_sample']   # refractive index of the sample
-        f_4f = params['f_4f']  # focal length of 4f system
-        ps_camera = params['ps_camera']  # pixel size of the camera
-        ps_BFP = params['ps_BFP']  # pixel size at back focal plane
-        # ori's edit from 26/01/2026 - phase retrival with d
-        #self.mask_offset_in_um = float(params.get('mask_offset_in_um', 0.0)) #27/01/2026
-        #self.lamda = lamda
-        #self.ps_BFP = ps_BFP
-        self.f_4f = f_4f
-        # 27/01/2026 - improved pr
-        self.lamda = float(lamda)
-        self.ps_BFP = float(ps_BFP)
-
+        self.device = params['device']
+        self.M = params['M']  # magnification
+        self.NA = params['NA']
+        self.n_immersion = params['n_immersion']  # refractive index of the immersion of the objective
+        self.lamda = params['lamda']  # wavelength
+        self.n_sample = params['n_sample']   # refractive index of the sample
+        self.f_4f = params['f_4f']  # focal length of 4f system
+        self.ps_camera = params['ps_camera']  # pixel size of the camera
+        self.ps_BFP = params['ps_BFP']  # pixel size at back focal plane
+        
         # ---- learnable d (mask displacement) ----
         self.d_min_um = params["d_min_um"]
         self.d_max_um = params["d_max_um"]
-        #d_init = float(params.get("mask_offset_in_um", 0.0))
-        if "mask_offset_in_um" in params:
-            if params["mask_offset_in_um"]!=0:  # bandage! to fix!
-                d_init = float(params["mask_offset_in_um"])
-            else:
-                d_init = 0.5 * (self.d_min_um + self.d_max_um)  # midrange default
-        else:
-            d_init = 0.5 * (self.d_min_um + self.d_max_um)  # midrange default
-        self.mask_offset_in_um = float(params.get("mask_offset_in_um", 0.0))
+        d_init = params.get("mask_offset_in_um", 0.5 * (self.d_min_um + self.d_max_um))
 
         self.centralBeadCoordinates_pixel = list(params['centralBeadCoordinates_pixel'])
-        self.ps_camera = params['ps_camera']
         self.NFP = params['NFP']  # location of the nominal focal plane
-        self.n_immersion = params['n_immersion']
-        self.NA = params['NA']
-        self.M = params['M']
 
 
         # map initial d into an unconstrained parameter via inverse-sigmoid (logit)
@@ -64,45 +37,40 @@ class ImModel_pr(torch.nn.Module):
         p = min(max(p, eps), 1.0 - eps)
         d_raw_init = math.log(p / (1.0 - p))
 
-        self.d_raw = torch.nn.Parameter(torch.tensor(d_raw_init, device=device, dtype=torch.float32))
-        # end improved pr 27/01/2026
+        self.d_raw = torch.nn.Parameter(torch.tensor(d_raw_init, device=self.device, dtype=torch.float32))
         # image
         H, W = params['H'], params['W']  # FOV size
         g_size = 9  # size of the gaussian blur kernel
         g_sigma = params['g_sigma']  # std of the gaussian blur kernel
-
         ###################
 
-        N = np.floor(f_4f * lamda / (ps_camera * ps_BFP))  # simulation size
+        N = np.floor(self.f_4f * self.lamda / (self.ps_camera * self.ps_BFP))  # simulation size
         N = int(N + 1 - (N % 2))  # make it odd
         print(f'Simulation size of the imaging model is {N} which must be larger than image size (PSF z-stack and training images)!')
 
         # pupil/aperture at back focal plane
-        d_pupil = 2 * f_4f * NA / np.sqrt(M ** 2 - NA ** 2)  # diameter [um]
+        d_pupil = 2 * self.f_4f * self.NA / np.sqrt(self.M ** 2 - self.NA ** 2)  # diameter [um]
         #print('d_pupil = ' + str(d_pupil))
-        pn_pupil = d_pupil / ps_BFP  # pixel number of the pupil diameter should be smaller than the simulation size N
+        pn_pupil = d_pupil / self.ps_BFP  # pixel number of the pupil diameter should be smaller than the simulation size N
         if N < pn_pupil:
             raise Exception('Simulation size is smaller than the pupil!')
         # cartesian and polar grid in BFP
-        x_phys = np.linspace(-N / 2, N / 2, N) * ps_BFP
+        x_phys = np.linspace(-N / 2, N / 2, N) * self.ps_BFP
         xi, eta = np.meshgrid(x_phys, x_phys)  # cartesian physical coordinates
         r_phys = np.sqrt(xi ** 2 + eta ** 2)
         pupil = (r_phys < d_pupil / 2).astype(np.float32)
 
-        x_ang = np.linspace(-1, 1, N) * (N / pn_pupil) * (NA / n_immersion)  # angular coordinate
+        x_ang = np.linspace(-1, 1, N) * (N / pn_pupil) * (self.NA / self.n_immersion)  # angular coordinate
         xx_ang, yy_ang = np.meshgrid(x_ang, x_ang)
         r = np.sqrt(
             xx_ang ** 2 + yy_ang ** 2)  # normalized angular coordinates, s.t. r = NA/n_immersion at edge of E field support
 
-        k_immersion = 2 * math.pi * n_immersion / lamda  # [1/um]
+        k_immersion = 2 * math.pi * self.n_immersion / self.lamda  # [1/um]
         sin_theta_immersion = r
-        #circ_NA = (sin_theta_immersion < (NA / n_immersion)).astype(
-        #    np.float32)  # the same as pupil, NA / n_immersion < 1
 
-        # ori's edit - added on 26/01/2026
         circ_scale = float(params.get("circ_scale", 1.0))  # 1.0 = default behavior
-        r_lim = (NA / n_immersion)
-        r_lim_scaled = (NA / n_immersion) * circ_scale
+        r_lim = (self.NA / self.n_immersion)
+        r_lim_scaled = (self.NA / self.n_immersion) * circ_scale
         #r_lim_scaled = circ_scale
         print("rlim_scaled = " + str(r_lim_scaled))
         print("r_lim = " + str(r_lim))
@@ -112,12 +80,10 @@ class ImModel_pr(torch.nn.Module):
         circ_NA = (sin_theta_immersion < r_lim).astype(np.float32)
         circ_NA_scaled = (sin_theta_immersion < r_lim_scaled).astype(np.float32)  # 28/01/2026
 
-        # end ori's edit from 26/01/2026
-
         cos_theta_immersion = np.sqrt(1 - (sin_theta_immersion * circ_NA) ** 2) * circ_NA
 
-        k_sample = 2 * math.pi * n_sample / lamda
-        sin_theta_sample = n_immersion / n_sample * sin_theta_immersion
+        k_sample = 2 * math.pi * self.n_sample / self.lamda
+        sin_theta_sample = self.n_immersion / self.n_sample * sin_theta_immersion
         # note: when circ_sample is smaller than circ_NA, super angle fluorescence apears
         circ_sample = (sin_theta_sample < 1).astype(np.float32)  # if all the frequency of the sample can be captured
         cos_theta_sample = np.sqrt(1 - (sin_theta_sample * circ_sample) ** 2) * circ_sample * circ_NA
@@ -125,44 +91,33 @@ class ImModel_pr(torch.nn.Module):
         # circular aperture to impose on BFP, SAF is excluded
         circ = circ_NA * circ_sample
         circ_scaled = circ_NA_scaled
-        #circ = circ_NA   # include SAF! 25/01/2026
-        #print(str(np.sum(circ)))
-        #print(str(np.sum(circ_NA * circ_sample)))
 
         pn_circ = np.floor(np.sqrt(np.sum(circ) / math.pi) * 2)
         pn_circ = int(pn_circ + 1 - (pn_circ % 2))
-        Xgrid = 2 * math.pi * xi * M / (lamda * f_4f)
-        Ygrid = 2 * math.pi * eta * M / (lamda * f_4f)
+        Xgrid = 2 * math.pi * xi * self.M / (self.lamda * self.f_4f)
+        Ygrid = 2 * math.pi * eta * self.M / (self.lamda * self.f_4f)
         Zgrid = k_sample * cos_theta_sample
         NFPgrid = k_immersion * (-1) * cos_theta_immersion  # -1
 
-        self.device = device
-        # ori's edit
-        self.device = torch.device(
-            "cuda:3" if torch.cuda.is_available() else "cpu")  # GPU device cuda:0, cuda:1, cuda:2 or cuda:3
-        print(f'device used (ImModel_pr): {device}')
-        # end ori's edit
-        self.Xgrid = torch.from_numpy(Xgrid).to(device)
-        self.Ygrid = torch.from_numpy(Ygrid).to(device)
-        self.Zgrid = torch.from_numpy(Zgrid).to(device)
-        self.NFPgrid = torch.from_numpy(NFPgrid).to(device)
-        self.circ = torch.from_numpy(circ).to(device)
-        self.circ_NA = torch.from_numpy(circ_NA).to(device)
-        self.circ_sample = torch.from_numpy(circ_sample).to(device)
+        self.Xgrid = torch.from_numpy(Xgrid).to(self.device)
+        self.Ygrid = torch.from_numpy(Ygrid).to(self.device)
+        self.Zgrid = torch.from_numpy(Zgrid).to(self.device)
+        self.NFPgrid = torch.from_numpy(NFPgrid).to(self.device)
+        self.circ = torch.from_numpy(circ).to(self.device)
+        self.circ_NA = torch.from_numpy(circ_NA).to(self.device)
+        self.circ_sample = torch.from_numpy(circ_sample).to(self.device)
         self.idx05 = int(N / 2)
         self.N = N
         self.pn_pupil = pn_pupil
         self.pn_circ = pn_circ
-        self.circ_scaled = torch.from_numpy(circ_scaled).to(device)
+        self.circ_scaled = torch.from_numpy(circ_scaled).to(self.device)
         # for a blur kernel
         g_r = int(g_size / 2)
-        g_xs = torch.linspace(-g_r, g_r, g_size, device=device).type(torch.float64)
+        g_xs = torch.linspace(-g_r, g_r, g_size, device=self.device).type(torch.float64)
         self.g_xx, self.g_yy = torch.meshgrid(g_xs, g_xs, indexing='xy')
 
         # crop settings
         self.r0, self.c0 = int(np.round((N-H)/2)), int(np.round((N-W)/2))
-        # h05, w05 = int(H / 2), int(W / 2)
-        # self.h05, self.w05 = h05, w05
         self.H, self.W = H, W
 
         # -------------------------
@@ -174,19 +129,15 @@ class ImModel_pr(torch.nn.Module):
         self.debug_max_emitters = int(params.get("debug_max_emitters", 5 ))  # save first K in batch  number of beads
         self._debug_call_idx = 0
         #self.phase_mask = torch.tensor(circ, device=device, requires_grad=True)
-        self.phase_mask = torch.zeros((N, N), device=device, requires_grad=True)
+        self.phase_mask = torch.zeros((N, N), device=self.device, requires_grad=True)
 
-        self.g_sigma = torch.tensor(g_sigma, device=device, requires_grad=True)
+        self.g_sigma = torch.tensor(g_sigma, device=self.device, requires_grad=True)
 
 
-
-    # ori's edit from 27/01/2026 for improved pr with displacement
     def d_um(self):
         # bounded to [d_min_um, d_max_um]
         return self.d_min_um + (self.d_max_um - self.d_min_um) * torch.sigmoid(self.d_raw)
-    # end ori's edit from 27/01/2026 for improved pr with displacement
 
-    # added on 27/01/2026
     def _maybe_save_debug(self, ef_bfp_eff, psfs, xyzps, NFPs):
         if not self.debug_bfp:
             return
@@ -258,7 +209,6 @@ class ImModel_pr(torch.nn.Module):
             out = os.path.join(subdir, f"call_{self._debug_call_idx:06d}.png")
             fig.savefig(out, dpi=200, bbox_inches="tight")
             plt.close(fig)
-    #end added on 27/01/2026
 
     def forward(self, xyzps, NFPs):
 
@@ -334,28 +284,22 @@ class ImModel_pr(torch.nn.Module):
         # -----------------------------------
         # propagate to mask plane
         # -----------------------------------
-        d = self.d_um() #if callable(self.d_um) else self.d_um
-        d_scalar = d # float(d.detach().cpu().item()) if torch.is_tensor(d) else float(d)
-
-        if abs(d_scalar) > 0:
-            ef_mask = asm_propagate( ef_bfp, self.lamda, self.ps_BFP, self.ps_BFP, +d_scalar, n=1.0, bandlimit=True).to(torch.complex64)
-        else:
-            ef_mask = ef_bfp
-
+        d = self.d_um()
+        ef_mask = asm_propagate(ef_bfp, self.lamda, self.ps_BFP, self.ps_BFP, d, n=1.0, bandlimit=True).to(torch.complex64)
+        
         # -----------------------------------
         # convert coarse lateral position to mask-plane shift
         # NOTE:
-        # This mapping is the part you should calibrate physically.
         # Current version uses a small-angle geometric approximation.
         #
         # x_coarse, y_coarse are in object-space um
-        # f_4f is used here as a placeholder effective propagation geometry. for a microscopic system with no 4f: the 4f value should be tube lens/M (e.g. f_obj)
+        # For a microscopic system with no 4f: the 4f value should be tube lens/M (e.g. f_obj)
         # -----------------------------------
         theta_x = x_coarse / (self.f_4f / self.M)
         theta_y = y_coarse / (self.f_4f / self.M)
 
-        dx_mask_um = d_scalar * theta_x
-        dy_mask_um = d_scalar * theta_y
+        dx_mask_um = d * theta_x
+        dy_mask_um = d * theta_y
 
         dx_mask_px = (dx_mask_um / self.ps_BFP).squeeze(1)
         dy_mask_px = (dy_mask_um / self.ps_BFP).squeeze(1)
@@ -388,8 +332,8 @@ class ImModel_pr(torch.nn.Module):
 
         # -----------------------------------
         # propagate back to BFP
-        if abs(d_scalar) > 0:
-            ef_bfp_after = asm_propagate(ef_mask_unshifted,self.lamda,self.ps_BFP,self.ps_BFP,-d_scalar, n=1.0,bandlimit=True).to(torch.complex64)
+        if abs(d) > 0:
+            ef_bfp_after = asm_propagate(ef_mask_unshifted,self.lamda,self.ps_BFP,self.ps_BFP,-d, n=1.0,bandlimit=True).to(torch.complex64)
         else:
             ef_bfp_after = ef_mask_unshifted
 
@@ -423,185 +367,3 @@ class ImModel_pr(torch.nn.Module):
             self._maybe_save_debug(ef_bfp_after, psfs, xyzps, NFPs)
 
         return psfs
-
-    ''' removed on 05/04/2026 (ditching s approach)
-    def forward(self, xyzps, NFPs):
-
-        ''''''
-        xx = np.linspace(-0.5,0.5,self.circ.shape[1]) * self.circ.shape[1]
-        yy = np.linspace(-0.5,0.5,self.circ.shape[0]) * self.circ.shape[0]
-        XX,YY = np.meshgrid(xx,yy)
-        circ_new = torch.ones_like(self.circ)
-        circ_new[((XX)**2+(YY)**2 > (160/2)**2)] = 0
-        #circ_new[((XX+40)**2+(YY-40)**2 < (130/2)**2)] = 1
-        #circ_new[((XX-40)**2+(YY+40)**2 < (130/2)**2)] = 1
-        ''''''
-        xyzp = xyzps  # um in object space
-        # pixel coordinates
-        x_pix = xyzp[:, 0:1] / self.ps_camera * self.M
-        y_pix = xyzp[:, 1:2] / self.ps_camera * self.M
-
-        # optical axis in pixels (col, row)
-        cx = self.centralBeadCoordinates_pixel[1]
-        cy = self.centralBeadCoordinates_pixel[0]
-
-        # pixel offset from optical axis
-        x_pix_rel = x_pix# - cx #already centered here
-        y_pix_rel = y_pix# - cy
-
-        # convert to sample-plane micrometers
-        x = x_pix_rel * self.ps_camera /self.M #
-        y = y_pix_rel * self.ps_camera /self.M
-
-        z = xyzp[:, 2:3]
-
-        photons = xyzp[:, 3:4].unsqueeze(1)
-
-        # --- finite differences (center pixel) ---
-        i0 = self.Xgrid.shape[0] // 2
-        j0 = self.Xgrid.shape[1] // 2
-        dX_col = (self.Xgrid[i0, j0 + 1] - self.Xgrid[i0, j0]).abs()  # phase coef step per +1 col
-        dY_row = (self.Ygrid[i0 + 1, j0] - self.Ygrid[i0, j0]).abs()  # phase coef step per +1 row
-
-        # true per-pixel phase increments
-        dphi_col = dX_col * i0  # ~ |ΔX|*|x|
-        dphi_row = dY_row * j0  # ~ |ΔY|*|y|
-
-        # cycles/pixel
-        ax = (dphi_col / (2 * torch.pi)).item()
-        ay = (dphi_row / (2 * torch.pi)).item()
-
-        ax = np.floor(np.abs(ax)) * 2 + 1
-        ay = np.floor(np.abs(ay)) * 2 + 1
-        s = int(np.sqrt(ax ** 2 + ay ** 2))  # ori's edit from 16/12/2025! to fix error in edges
-
-        # --- scale lateral tilt & distance only ---
-        x_s = x / s
-        y_s = y / s
-        z_s = xyzp[:, 2:3] / s  # note -should be absolute value??
-        d = self.d_um()  # torch scalar, has grad
-        d_eff = d * s
-        #print('Debug!! d=' + str(d))
-
-        # calculating round phase shift to keep sub pixel shift
-
-        x_sub = x - torch.round(x *self.M / self.ps_camera) * self.ps_camera / self.M
-        y_sub = y - torch.round(y *self.M / self.ps_camera) * self.ps_camera / self.M
-        phase_lateral_sub_pixel = self.Xgrid * x_sub.unsqueeze(1) + self.Ygrid * y_sub.unsqueeze(1)
-        phase_lateral_sub_pixel = phase_lateral_sub_pixel
-        #phase_lateral_sub_pixel *=0
-        #
-
-        # phases with scaled lateral tilt, original axial
-        NFPs_b = NFPs.to(self.NFPgrid.dtype).view(-1, 1, 1)
-        NFPs_s = NFPs_b / s
-        phase_axial = (self.Zgrid * z_s.unsqueeze(1) + self.NFPgrid * NFPs_s)
-        phase_nfp = (self.NFPgrid * NFPs_b) .to(torch.complex64)
-
-        actual_phase_axial = (self.Zgrid * z.unsqueeze(1) + self.NFPgrid * NFPs_b)
-        phase_lateral = self.Xgrid * x_s.unsqueeze(1) + self.Ygrid * y_s.unsqueeze(1)
-        circ_final_bfp = self.circ_NA # *self.circ_sample or self.circ_NA
-        #circ_final_bfp = self.circ_sample # for mask design
-
-        #ef_bfp = torch.exp(1j * (phase_axial + phase_lateral)).to(torch.complex64)
-        ebfp_on_axis = torch.exp(1j * (actual_phase_axial)).to(torch.complex64)
-
-        # adding amplitude of bfp 22/12/2025
-        # xi = self.Xgrid/2/np.pi/self.M *(self.lamda*self.f_4f) / self.ps_BFP / (self.N//2)
-        # eta = self.Ygrid/2/np.pi/self.M *(self.lamda*self.f_4f) / self.ps_BFP
-        inx1 = torch.where(self.circ[np.shape(self.circ)[0] // 2, :] == 1)
-        inx1 = inx1[0][0]
-        inx1 = (np.shape(self.circ)[0] / 2 - inx1).to(self.device)
-
-        x_phys = torch.linspace(-self.N / 2, self.N / 2, self.N).to(self.device)
-        x_norm = x_phys / inx1
-        y_phys = torch.linspace(-self.N / 2, self.N / 2, self.N).to(self.device)
-        y_norm = y_phys / inx1
-
-        # xx, yy = meshgrid(x_norm, y_norm); need to do meshgrid
-        # rho2 = xx ** 2 + yy ** 2
-        rho2 = x_norm ** 2 + y_norm ** 2
-        amp = 1 / torch.abs(((1 - rho2 * (self.NA / self.n_immersion) ** 2 + 1e-16)) ** (1 / 4))
-        ef_bfp = torch.exp(1j * (phase_axial + phase_lateral)).to(torch.complex64) * circ_final_bfp
-        ef_bfp[torch.isnan(ef_bfp)] = 0
-
-        ef_bfp = torch.where(circ_final_bfp>0.5, ef_bfp, 0)  #  removed on 12/17/2025 - probably it is better this way!
-        ef_bfp_nocirc = torch.exp(1j * (phase_axial + phase_lateral)).to(torch.complex64)
-
-        # forward propagate
-        if d_eff != 0.0:
-            ef_off = asm_propagate(ef_bfp, self.lamda, self.ps_BFP, self.ps_BFP, +d_eff, n=1.0, bandlimit=True)
-            ef_off_nocirc = asm_propagate(ef_bfp_nocirc, self.lamda, self.ps_BFP, self.ps_BFP, +d_eff, n=1.0, bandlimit=True)
-            #ef_off_on_axis =  asm_propagate(ebfp_on_axis, self.lamda, self.ps_BFP, self.ps_BFP, +d_eff, n=1.0, bandlimit=True)
-
-        else:
-            ef_off = ef_bfp
-            ef_off_nocirc = ef_bfp_nocirc
-
-        # mask & circ
-        phase = torch.exp(1j * self.phase_mask.to(ef_off.device).to(torch.float32))
-        # correcting phase so mask will be without axial offset
-
-        circ_phase = (self.circ_scaled > 0.5).unsqueeze(0)
-
-        ef_off = ef_off * phase * circ_phase
-        ef_off = torch.where(circ_phase>0.5, ef_off, 0)
-
-        # back propagate
-        if d_eff != 0.0:
-            ef_bfp = asm_propagate(ef_off, self.lamda, self.ps_BFP, self.ps_BFP, -d_eff, n=1.0, bandlimit=True).to(
-                torch.complex64)
-
-            ef_bfp_nocirc = asm_propagate(ef_off_nocirc, self.lamda, self.ps_BFP, self.ps_BFP, -d_eff, n=1.0, bandlimit=True).to(
-                torch.complex64)
-
-            ef_phase_mask_only = phase * circ_phase * torch.exp(1j * phase_lateral)
-            ef_phase_mask_only =asm_propagate(ef_phase_mask_only, self.lamda, self.ps_BFP, self.ps_BFP, -d_eff, n=1.0, bandlimit=True).to(torch.complex64)
-
-
-        else:
-            ef_bfp = ef_off
-            ef_bfp_nocirc = ef_off_nocirc
-            ef_phase_mask_only = (phase * circ_phase) .to(torch.complex64)
-
-        # remove only the (scaled) lateral phase before FFT (same as your original flow)
-        ef_bfp = ef_bfp * torch.exp(1j * (-phase_lateral + phase_lateral_sub_pixel)).to(torch.complex64)  # * self.circ
-        #ef_bfp = ef_bfp * torch.exp(1j * (actual_phase_axial - phase_axial)).to(torch.complex64) * circ_final_bfp
-        ef_bfp = ef_bfp * torch.exp(1j * (actual_phase_axial).to(torch.complex64)) * circ_final_bfp /((ef_bfp_nocirc)* torch.exp(1j * (-phase_lateral).to(torch.complex64) ))
-        ef_bfp = torch.where(circ_final_bfp>0.5, ef_bfp, 0)  #  removed on 12/17/2025 - probably it is better this way!
-
-
-        psf_field = torch.fft.fftshift( torch.fft.fftn(torch.fft.ifftshift(ef_bfp, dim=(1, 2)), dim=(1, 2)), dim=(1, 2))
-        psf_on_axis = torch.fft.fftshift(torch.fft.fftn(torch.fft.ifftshift(ebfp_on_axis * self.circ, dim=(1, 2)), dim=(1, 2)), dim=(1, 2))
-
-        psf = torch.abs(psf_field) ** 2
-
-        psfs = psf / torch.sum(torch.abs(psf), dim=(1, 2), keepdims=True) * photons
-
-        MEAN = psfs.mean()
-        STD = psfs.std()
-        psfs = torch.where(psfs>MEAN+0*STD, psfs, 0) # are we sure?
-
-
-        # blur (batched)
-        g_sigma = (torch.round(0.8 * self.g_sigma, decimals=2), torch.round(1.0 * self.g_sigma, decimals=2))
-        sigma = g_sigma[0]+torch.rand(1).to(self.device)*(g_sigma[1]-g_sigma[0])
-
-        blur_kernel = 1 / (2 * pi * sigma ** 2) * ( torch.exp(-0.5 * (self.g_xx ** 2 + self.g_yy ** 2) / sigma ** 2)  )
-        psfs = F.conv2d(psfs.unsqueeze(1), blur_kernel.unsqueeze(0).unsqueeze(0).type_as(psfs),padding='same').squeeze(1)
-
-        psfs = psfs / torch.sum(torch.abs(psfs), dim=(1, 2), keepdims=True) * photons
-
-
-        # photon normalization
-        psfs = psfs[:, self.r0:self.r0 + self.H, self.c0:self.c0 + self.W]
-
-        if self.debug_bfp:
-            ef_bfp_axial_phase_removed = ef_bfp
-            ef_phase_mask_only = ef_phase_mask_only * torch.exp(-1j * phase_lateral)
-            ef_phase_mask_only = torch.where(circ_phase, ef_phase_mask_only, 0)
-            ef_phase_mask_only = ef_phase_mask_only * torch.exp(1j * phase_nfp.to(torch.complex64)) * circ_phase
-            self._maybe_save_debug(ef_phase_mask_only, psfs, xyzps, NFPs)
-
-        return psfs
-     ''' # end 05/04/2026
