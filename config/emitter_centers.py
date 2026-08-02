@@ -9,18 +9,18 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 # Beads in air (on coverslip) for 21/01/2026
 # inputs mes3 (main microtubuls) - behind_obj_exc_640nm_oil_x100_145_step0.2um_027
 ZSTACK_FILES_PATH = Path("2026_02_16_microtubules/beads_shiftedFOV_afterExperiment/")
-ZSTACK_FILE = str(PROJECT_DIR / ZSTACK_FILES_PATH / "center_x477_y573_2um.tif")
+ZSTACK_FILE = "center_x477_y573_2um.tif"
 CENTRAL_BEAD_COORDINATES_PIXEL = [573, 477]  # optical axis reference ([y,x])
 
 OFFAXIS_ZSTACK_FILES = [
-    str(PROJECT_DIR / ZSTACK_FILES_PATH / "bottomRight_x866_y765_2um.tif"),
-    str(PROJECT_DIR / ZSTACK_FILES_PATH / "topRight_x851_y173_2um.tif"),
-    str(PROJECT_DIR / ZSTACK_FILES_PATH / "top_x364_y152_2um.tif"),
-    str(PROJECT_DIR / ZSTACK_FILES_PATH / "Left_x146_y417_2um.tif"),
+    "bottomRight_x866_y765_2um.tif",
+    "topRight_x851_y173_2um.tif",
+    "top_x364_y152_2um.tif",
+    "Left_x146_y417_2um.tif",
 
-    str(PROJECT_DIR / ZSTACK_FILES_PATH / "centerTop_x582_y358.tif"),
-    str(PROJECT_DIR / ZSTACK_FILES_PATH / "centerBottom_x368_y826.tif"),
-    str(PROJECT_DIR / ZSTACK_FILES_PATH / "bottom_x682_y982.tif")  # bottom - area of interest so 2um_025
+    "centerTop_x582_y358.tif",
+    "centerBottom_x368_y826.tif",
+    "bottom_x682_y982.tif"  # bottom - area of interest so 2um_025
 ]
 
 OFFAXIS_COORDS_PIXEL = [

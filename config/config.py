@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import numpy as np
 from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Optional, List
 
 
@@ -24,9 +25,11 @@ class UserConfig:
     zrange: str = "0.0, 3.2"  # display z-range (um)
 
     # --- Data (no defaults — must be set explicitly per experiment) ---
-    zstack_file: str = ""
+    project_dir: str = ""     # root directory holding experiment data; "" = resolve relative to cwd
+    zstack_folder: str = ""   # subfolder (relative to project_dir) holding the z-stack .tif files
+    zstack_file: str = ""     # filename only, resolved against project_dir/zstack_folder
     central_bead_coordinates_pixel: List[int] = field(default_factory=list)  # [row, col]
-    offaxis_zstack_files: List[str] = field(default_factory=list)
+    offaxis_zstack_files: List[str] = field(default_factory=list)  # filenames only
     offaxis_coords_pixel: List[List[int]] = field(default_factory=list)
     external_mask: Optional[str] = None  # path to .npy mask, or None to run phase retrieval
     # TODO (RK): make external_mask a starting point rather than an override of phase retrieval
@@ -40,6 +43,17 @@ class UserConfig:
     def _parse_nfps(self) -> np.ndarray:
         start, stop, n = [x.strip() for x in self.nfp_text.split(',')]
         return np.linspace(float(start), float(stop), int(n))
+
+    def _resolve_data_path(self, filename: str) -> str:
+        return str(Path(self.project_dir) / self.zstack_folder / filename)
+
+    @property
+    def zstack_file_path(self) -> str:
+        return self._resolve_data_path(self.zstack_file)
+
+    @property
+    def offaxis_zstack_file_paths(self) -> List[str]:
+        return [self._resolve_data_path(f) for f in self.offaxis_zstack_files]
 
 
 @dataclass
@@ -100,7 +114,7 @@ class Config:
             'NFP': u.NFP, 'nfps': u.nfps,
             # bead geometry
             'centralBeadCoordinates_pixel': u.central_bead_coordinates_pixel,
-            'offaxis_zstack_files': u.offaxis_zstack_files,
+            'offaxis_zstack_files': u.offaxis_zstack_file_paths,
             'offaxis_coords_pixel': u.offaxis_coords_pixel,
             # display
             'zrange': tuple(float(x) for x in u.zrange.split(',')),
@@ -128,7 +142,7 @@ class Config:
         """
         u, a = self.user, self.advanced
         return {
-            'zstack_file_path': u.zstack_file,
+            'zstack_file_path': u.zstack_file_path,
             'nfps': u.nfps,
             'r_bead': a.r_bead,
             'epochs': a.epochs,

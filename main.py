@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from config.config import Config, UserConfig
 from config.emitter_centers import (
+    PROJECT_DIR as DATA_ROOT_DIR, ZSTACK_FILES_PATH,
     ZSTACK_FILE, CENTRAL_BEAD_COORDINATES_PIXEL, OFFAXIS_ZSTACK_FILES, OFFAXIS_COORDS_PIXEL, RAW_IMAGE_FOLDER
 )
 from func_utils import characterize_PSF
@@ -28,7 +29,9 @@ PROJECT_DIR = Path(__file__).resolve().parent
 # =============================================================================
 cfg = Config(
     user=UserConfig(
-        zstack_file=str(ZSTACK_FILE),
+        project_dir=str(DATA_ROOT_DIR),
+        zstack_folder=str(ZSTACK_FILES_PATH),
+        zstack_file=ZSTACK_FILE,
         central_bead_coordinates_pixel=CENTRAL_BEAD_COORDINATES_PIXEL,
         offaxis_zstack_files=OFFAXIS_ZSTACK_FILES,
         offaxis_coords_pixel=OFFAXIS_COORDS_PIXEL,
