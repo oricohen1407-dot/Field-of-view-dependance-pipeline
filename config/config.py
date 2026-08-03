@@ -31,8 +31,7 @@ class UserConfig:
     central_bead_coordinates_pixel: List[int] = field(default_factory=list)  # [row, col]
     offaxis_zstack_files: List[str] = field(default_factory=list)  # filenames only
     offaxis_coords_pixel: List[List[int]] = field(default_factory=list)
-    external_mask: Optional[str] = None  # path to .npy mask, or None to run phase retrieval
-    # TODO (RK): make external_mask a starting point rather than an override of phase retrieval
+    external_mask: Optional[str] = None  # starting-guess mask (.npy/.mat) for phase retrieval, or None for zero-init
 
     # --- Derived: computed from nfp_text in __post_init__, excluded from serialization ---
     nfps: np.ndarray = field(init=False, repr=False)

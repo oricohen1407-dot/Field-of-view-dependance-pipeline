@@ -237,7 +237,7 @@ def build_demo() -> gr.Blocks:
                 value=defaults[16], lines=3,
             )
             u_ext_mask    = gr.Textbox(
-                label="External mask (.npy path) — leave empty to run phase retrieval",
+                label="Starting-guess mask for phase retrieval (.npy/.mat path, optional)",
                 value=defaults[17],
             )
 
