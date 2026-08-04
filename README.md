@@ -329,27 +329,14 @@ Use this short runner at the bottom of `main.py`:
 #   "train"     - network training
 #   "test"      - test reconstruction on one frame
 #   "localize"  - localization on the experimental movie
+#
+# Examples:
+#   CUSTOM_STEPS = ["psf"]
+#   CUSTOM_STEPS = ["td", "train"]
+#   CUSTOM_STEPS = ["train", "test", "localize"]
+#   CUSTOM_STEPS = ["psf", "preproc", "snr", "td", "train", "test", "localize"]
 
 CUSTOM_STEPS = ["psf", "preproc", "snr", "td", "train", "test", "localize"]
-
-# =============================================================================
-# RUNNER
-# =============================================================================
-
-VALID_STEPS = {"psf", "preproc", "snr", "td", "train", "test", "localize"}
-
-
-def run_custom_steps(steps):
-    for step in steps:
-        if step not in VALID_STEPS:
-            raise ValueError(
-                f"Unknown step '{step}'. "
-                f"Allowed steps are: {sorted(VALID_STEPS)}"
-            )
-
-        print(f"\n~~~~~~~~~~~~~~~~~~~~~~ running {step} stage ~~~~~~~~~~~~~~~~~~~~~~")
-        run_step(step)
-
 
 if __name__ == "__main__":
     run_custom_steps(CUSTOM_STEPS)
@@ -385,7 +372,7 @@ resume_net_file = None
 During training, checkpoints are saved in `training_results/`. The `last_net_*.pt` checkpoint can be used to resume training.
 
 ---
-
+step should be executed in order. running "test" before "train" (and so on) will result in error.
 ## Output Files and Folders
 
 Typical outputs include:
