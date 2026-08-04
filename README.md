@@ -280,7 +280,7 @@ Future improvements should restore or improve automatic SNR estimation.
 ### Gaussian blur parameter
 
 ```python
-param_dict["g_sigma"] = 1.0
+param_dict["g_sigma"] = 1.4
 ```
 
 This is the image-plane blur parameter used during phase retrieval and training-data simulation. A typical useful range is approximately 0.8 to 1.8. Phase retrieval also optimizes this parameter, preferably with a low learning rate for fine tuning.
