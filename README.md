@@ -379,8 +379,6 @@ Typical outputs include:
 
 ```text
 phase_retrieval_outputs/       # retrieved phase mask, fitted parameters, simulated/experimental comparisons
-phase_retrieval_results.jpg    # phase-retrieval summary figure
-PSFs.jpg                       # model PSF examples
 training_data/                 # generated synthetic training data
 training_data/x/               # saved training image tiles
 training_data/y.pickle         # labels for training images
@@ -389,7 +387,6 @@ training_results/              # trained network checkpoints and training curves
 sim_exp.tif                    # side-by-side simulated/experimental comparison
 loss_curves.jpg                # training/validation loss curves
 sim_loc_gt_rec.jpg             # test localization comparison
-sim_im_gt_rec.jpg              # simulated image/reconstruction overlay
 exp_im_gt_rec.jpg              # experimental test image/reconstruction overlay
 localizations_*_chunk_*.csv    # final localization chunks, divided by frame chunks
 ```
