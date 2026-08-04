@@ -897,6 +897,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             print("grad(d_raw):", None if im_model.d_raw.grad is None else im_model.d_raw.grad.detach().item())
 
         opt.step()
+        '''  # not validated
         Visualize_mask = True
         # visualization
         if Visualize_mask:
@@ -920,7 +921,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
                                 dpi=300)
                     plt.clf()
                     # End visualization
-
+        '''
         # keep sigma sane (optional but helps)
         with torch.no_grad():
             im_model.g_sigma.clamp_(min=1e-3, max=20.0)
