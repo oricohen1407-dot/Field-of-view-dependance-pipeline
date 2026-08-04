@@ -3,21 +3,21 @@
 
 This repository contains a field-of-view-aware 3D single-molecule localization microscopy (SMLM) reconstruction pipeline. It was developed for experiments in which a phase mask is placed in an arbitrary plane between the objective lens and the tube lens, displaced from the shift-invariant conjugate Fourier/pupil plane. In this configuration, the engineered point-spread function (PSF) can depend on the emitter position in the camera field of view.
 
-The workflow combines bead-based calibration, a displaced-mask optical forward model, synthetic training-data generation, neural-network training, and localization of experimental blinking data.
+The workflow combines bead-based calibration of a displaced phase-mask with optical forward model, synthetic training-data generation, neural-network training, and localization of experimental blinking data.
 
-> **Status:** research code under active development. Paths, microscope parameters, GPU index, and acquisition-specific settings should be edited in `debugger.py` before running.
+> **Status:** research code under active development. Paths, microscope parameters, GPU index, and acquisition-specific settings should be edited in `main.py` before running.
 
 ---
 
 ## Main Idea
 
-In a conventional shift-invariant PSF model, one calibrated PSF is assumed to represent all emitters in the camera field because the Fourier/pupil plane is treated as space invariant.
+In a conventional shift-invariant PSF model, one calibrated PSF is assumed to represent all emitters in the camera field because the Fourier/pupil plane; e.g. a space invariant system.
 
 In the displaced-mask configuration used here, off-axis emitters illuminate shifted regions of the phase mask. Depending on the nominal focal plane and the mask displacement, the beam can also be converging or diverging at the mask plane. This creates field-dependent PSF distortions that may need to be included in the reconstruction model.
 
 This pipeline therefore:
 
-1. Retrieves or loads a phase mask from bead z-stack calibration.
+1. Retrieves a phase mask from beads z-stack calibration.
 2. Uses a displaced-mask forward model to simulate PSFs at different field positions.
 3. Generates synthetic training frames over the full camera field of view.
 4. Splits full synthetic frames into smaller training tiles while preserving their global FOV coordinates.
@@ -31,7 +31,7 @@ This pipeline therefore:
 
 ```text
 .
-├── debugger.py          # Main non-GUI entry point; edit experiment parameters here
+├── main.py              # Main point; run pipeline steps and edit experiment parameters here
 ├── func_utils.py        # High-level pipeline steps: PSF, preprocessing, training data, training, inference
 ├── app_utils.py         # Phase retrieval, preprocessing, training-data generation, training, inference
 ├── app.py               # GUI entry point, if used
@@ -40,30 +40,29 @@ This pipeline therefore:
     └── training_utils.py# Training loop and checkpoint handling
 ```
 
-The recommended workflow is through `debugger.py`.
+The recommended workflow is through `main.py`.
 
 ---
 
-## Installation
+## Installation / Environment
 
-Create a Python environment with PyTorch and the scientific Python packages used by the pipeline.
+This is research code and is intended to run in a Python environment with GPU support.
 
-Example:
+The code uses standard Python scientific-computing and deep-learning libraries. No special custom installation is required beyond a working Python environment with PyTorch.
 
-```bash
-conda create -n fov3d python=3.10
-conda activate fov3d
+The main packages used by the code are:
 
-# Install PyTorch according to your CUDA version from pytorch.org.
-# Example only:
-# conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+- PyTorch
+- NumPy
+- SciPy
+- scikit-image
+- matplotlib
+- scikit-learn
+- tqdm
 
-pip install numpy scipy scikit-image matplotlib scikit-learn tqdm
-```
+The code is intended to run with GPU support. CPU execution may work for small tests, but phase retrieval, training-data generation, network training, and localization are expected to be slow without CUDA.
 
-The code is GPU-oriented. CPU execution may work for small tests, but phase retrieval, training-data generation, training, and inference are expected to be slow without CUDA.
-
----
+The recommended workflow is to open the project in PyCharm or another Python IDE, select the appropriate Python environment, edit `main.py` for parameter and which steps of the pipeline to run, and press **Run**.
 
 ## Required Input Data
 
@@ -77,15 +76,19 @@ Example first image from a bead z-stack:
 
 <img width="225" height="225" alt="image" src="https://github.com/user-attachments/assets/da4667d8-77d2-4408-8aa8-db0ee23f576f" />
 
-
-Configured in `debugger.py`:
+Configured in `main.py`:
 
 ```python
 zstack_file = "path/to/central_bead_zstack.tif"
 centralBeadCoordinates_pixel = [row, col]
 ```
-
 Coordinates are in camera pixels and use `[row, col]` ordering.
+
+Example demo file from the microtubules experiment, relative to the repository root:
+
+```text
+/Microtubules_dSTORM/Calibration_stack/step0.2um_027_center_x477_y573_2um.tif
+```
 
 ### 2. Off-axis bead z-stacks
 
@@ -99,7 +102,7 @@ Example first images from off-axis bead z-stacks:
   <img width="225" height="225" alt="image" src="https://github.com/user-attachments/assets/8aed3e0a-337c-4ceb-91af-d956369e9157" />
 </p>
 
-Configured in `debugger.py`:
+Configured in `main.py`:
 
 ```python
 offaxis_zstack_files = [
@@ -116,6 +119,19 @@ offaxis_coords_pixel = [
 ```
 
 Coordinates are in camera pixels and use `[row, col]` ordering.
+
+Example demo file from the microtubules experiment, relative to the repository root:
+
+```text
+/Microtubules_dSTORM/Calibration_stack/step0.2um_027_bottomRight_x866_y765_2um.tif
+/Microtubules_dSTORM/Calibration_stack/step0.2um_027_topRight_x851_y173_2um.tif
+/Microtubules_dSTORM/Calibration_stack/step0.2um_027_top_x364_y152_2um.tif
+/Microtubules_dSTORM/Calibration_stack/step0.2um_027_Left_x146_y417_2um.tif
+/Microtubules_dSTORM/Calibration_stack/step0.2um_027_centerTop_x582_y358.tif
+/Microtubules_dSTORM/Calibration_stack/step0.2um_027_centerBottom_x368_y826.tif
+/Microtubules_dSTORM/Calibration_stack/step0.2um_025_bottom_x682_y982.tif
+```
+
 
 ### 3. Experimental blinking frames
 
@@ -139,11 +155,17 @@ Example noise/histogram inspection:
 
 In this example, the selected ROI has a mean gray level of approximately 29, interpreted as the background offset, and a standard deviation of approximately 14, interpreted as the noise level.
 
+Example demo file from the microtubules experiment, relative to the repository root:
+
+```text
+/Microtubules_dSTORM/Experiment_50_frames/
+```
+
 ---
 
 ## Main Configuration Parameters
 
-Most experiment-specific parameters should be edited in `debugger.py`.
+Most experiment-specific parameters should be edited in `main.py`.
 
 ### Optical and acquisition parameters
 
@@ -240,7 +262,7 @@ This controls how much of each inference tile is trusted during overlapping tile
 
 ### Noise and signal simulation
 
-Manual simulation noise settings can be defined in `debugger.py`:
+Manual simulation noise settings can be defined in `main.py`:
 
 ```python
 shot_noise_background_range = (8.0, 16.0)
@@ -288,9 +310,9 @@ The current lateral shift is cyclic, so the emitter ROI should be large enough t
 
 ## Running the Pipeline
 
-The recommended workflow is to open `debugger.py`, edit the configuration values, choose the stages in `CUSTOM_STEPS`, and press **Run** in PyCharm.
+The recommended workflow is to open `main.py`, edit the configuration values, choose the stages in `CUSTOM_STEPS`, and press **Run** in PyCharm.
 
-Use this short runner at the bottom of `debugger.py`:
+Use this short runner at the bottom of `main.py`:
 
 ```python
 # =============================================================================
@@ -443,7 +465,7 @@ If the image size does not divide evenly, crop or pad the image so that the full
 
 ### CUDA/GPU issues
 
-Set the GPU index in `debugger.py`:
+Set the GPU index in `main.py`:
 
 ```python
 GPU_INDEX = 1
