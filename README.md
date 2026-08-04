@@ -397,37 +397,6 @@ By default, localization results may be written in chunks, for example one CSV p
 
 ## Notes for Editing or Extending the Code
 
-### Keep global FOV information
-
-For FOV-dependent reconstruction, each training tile must know where it came from in the full camera image. The code stores this using:
-
-```python
-param_dict["camera_size_px"]
-param_dict["tile_grid"]
-param_dict["tile_size_px"]
-```
-
-These values are used to build global x/y coordinate channels for training and inference.
-
-### Use compatible training and inference settings
-
-The following parameters should remain consistent between training and inference:
-
-```text
-training_im_size
-num_tiles
-center_fraction
-zrange
-num_z_voxel
-us_factor
-threshold
-camera_size_px
-tile_grid
-tile_size_px
-```
-
-Changing these after training can lead to incorrect coordinate maps or mismatched network input sizes.
-
 ### Full canvas size must be divisible by `num_tiles`
 
 For regular tiling, the full simulated image size should be divisible by the number of tiles.
