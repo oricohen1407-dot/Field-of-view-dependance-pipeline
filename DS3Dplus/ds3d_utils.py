@@ -517,6 +517,7 @@ class ImModel(nn.Module):
         plt.show()
 
     def model_demo(self, zs):
+        '''  # from AutoDS3D. not validated yet
         xyzps = np.c_[np.zeros(zs.shape[0]), np.zeros(zs.shape[0]), zs, np.ones(zs.shape[0]) * 1e4]
         zstack = self.get_psfs(torch.from_numpy(xyzps).to(self.device)).cpu()
         plt.figure(figsize=(6, 2))
@@ -526,7 +527,7 @@ class ImModel(nn.Module):
         plt.savefig('PSFs.jpg', bbox_inches='tight', dpi=300)
         plt.clf()
         print('Imaging model: PSFs.jpg')
-
+        '''
 
 class ImModelBase(nn.Module):
     def __init__(self, params):

@@ -1298,21 +1298,10 @@ def training_data_func(param_dict):
 
     # end ori's edit
 
-    # 07/02/2026
     print("[TRAIN] camera_size_px in labels:", labels_dict.get("camera_size_px", None))
     print("[TRAIN] tile_grid:", labels_dict.get("tile_grid", None))
     print("[TRAIN] labels camera_size_px =", labels_dict.get("camera_size_px", None))
 
-    # end 07/02/2026
-
-    '''
-    # labels_dict for training
-    labels_dict = {}
-    labels_dict['volume_size'] = (param_dict['D'], param_dict['HH'], param_dict['WW'])
-    labels_dict['us_factor'] = param_dict['us_factor']
-    labels_dict['blob_r'] = sampling.blob_r  # radius of each 3D blob representing an emitter in space
-    labels_dict['blob_maxv'] = sampling.blob_maxv  # maximum value of blobs
-    '''
 
     ntrain = param_dict['n_ims']
     for i in range(ntrain):
@@ -1321,60 +1310,24 @@ def training_data_func(param_dict):
         if i == 0:
             print("Train batch z range [µm]:", xyzps[:, 2].min(), xyzps[:, 2].max())
         # end ori's edit
-
-        # im = model(torch.from_numpy(xyzps).to(device)).cpu().numpy().astype(np.uint16)
         # Ori's edit
-        # Hc, Wc = param_dict['camera_size_px']  # e.g. (1400, 1400)
         Hc = param_dict['H']
         Wc = param_dict['W']
         ps_xy = param_dict['ps_camera'] / param_dict['M']  # µm per pixel in image plane
         canvas = np.zeros((Hc, Wc), dtype=np.float32)
-        # mask_offset_in_um = param_dict['mask_offset_in_um']
-        # small-grid size (mask grid) from the model
         N = int(model.N)  # ≈203, odd
         r = N // 2
 
         for k in range(xyzps.shape[0]):
-            # xyzp_t = np.array(xyzps[k],  copy=True)
-            '''if k == 0:
-                xyzps[k] = [0.0, 0.0, 0.8, 100000]
-            if k == 1:
-                xyzps[k] = [0.0, 0.11/2, 0.8, 100000]
-            if k == 2:
-                xyzps[k] = [0.0, 0.11/4, 0.8, 100000]
-            if k == 3:
-                xyzps[k] = [-0.11/2, 0.0, 0.8, 100000]
-            if k>2:
-                continue
-            '''
             x_um, y_um, z_um, photons = xyzps[k]
-            # print("x_um =", x_um, " y_um=", y_um)
-            # x_um, y_um, z_um, photons = xyzps[k]
+
             # convert emitter center (µm) → canvas pixel center
             c = int(round(x_um / ps_xy + (Wc - 1) / 2))
 
             r0 = int(round(y_um / ps_xy + (Hc - 1) / 2))
-            # if i == 0 and k < 3:
-            #    print(f"[stitch] emitter{k}: x_um={x_um:.4f}, y_um={y_um:.4f} -> paste center (r0,c)={(r0, c)}")
 
-            # patch = model.psf_patch_clean(xyzps[k])  # (N,N), float
             patch = model.psf_patch_clean(xyzps[k])  # (N,N), float
 
-            # for debug
-            # xyzps_debug = xyzps[0]
-            # xyzps_debug = np.array([0.0,0.0,2.0,100000.0])
-            # patch = model.psf_patch_clean(xyzps_debug)  # (N,N), float
-            # xyzps_debug = np.array([1,0.0,2.0,100000.0])
-            # patch += model.psf_patch_clean(xyzps_debug)  # (N,N), float
-            # patch = model.psf_patch_clean(xyzps_debug[1])  # (N,N), float
-            # end for debug
-
-            # print("x_um =", x_um, " y_um=", y_um)
-
-            # plt.imshow(patch, cmap="twilight")
-            # plt.colorbar()
-            # plt.title("x_um ="+ str(x_um) + " y_um="+ str(y_um))
-            # plt.savefig("patch_"+str(k).zfill(3)+".png", dpi=200)
 
             # paste with clipping
             rr0 = max(0, r0 - r)
@@ -1391,9 +1344,6 @@ def training_data_func(param_dict):
                 canvas[rr0:rr1, cc0:cc1] += patch[pr0:N - pr1, pc0:N - pc1]
         # add noise once (keep your existing ranges)
 
-        # added on 21/07/2026 - free emitters in fov
-        # Add PAINT-like free-emitter background.        # Important: this changes the image only, not the labels.
-        # canvas = add_free_emitter_background(canvas, model, param_dict)
         # end  21/07/2026 - free emitters in fov
         im = canvas
 
@@ -1441,51 +1391,15 @@ def training_data_func(param_dict):
             # (optional but useful later) remember your tiling
             param_dict['tile_grid'] = (numOfPatches, numOfPatches)
             param_dict['tile_size_px'] = (H_new, W_new)
-            '''
-            # added on 14 / 04 / 2026: save patches randomly
-            num_crops_per_image = numOfPatches * numOfPatches
-            for crop_idx in range(num_crops_per_image):
-                # 1. Pick a random top-left corner that ensures the crop fits on the canvas
-                y0 = np.random.randint(0, H - H_new + 1)
-                x0 = np.random.randint(0, W - W_new + 1)
-                y1 = y0 + H_new
-                x1 = x0 + W_new
 
-                # 2. Crop the image tile
-                im = canvas2[y0:y1, x0:x1]
-
-                # 3. Create the filename
-                x_name = str(i).zfill(5) + '_FOV_' + str(crop_idx).zfill(5) + '.tif'
-
-                # 4. Find which emitters fall inside this random crop
-                mask = (
-                        (xyz_ids[:, 0] >= x0) & (xyz_ids[:, 0] < x1) &
-                        (xyz_ids[:, 1] >= y0) & (xyz_ids[:, 1] < y1)
-                )
-
-                # 5. Save the tile and its relative coordinates
-                if np.any(mask) | 1:  # Keep your logic to save empty tiles too
-                    xyz_ids_fov = xyz_ids[mask].copy()
-                    blob3d_fov = blob3d[mask].copy()
-
-                    # Rebase to tile-local indices
-                    xyz_ids_fov[:, 0] -= x0
-                    xyz_ids_fov[:, 1] -= y0
-
-                    io.imsave(os.path.join(x_folder, x_name), im, check_contrast=False)
-                    labels_dict[x_name] = (xyz_ids_fov, blob3d_fov)
-                    # end 14/04/2026
-                '''
             for ii in range(0, numOfPatches):
                 for jj in range(0, numOfPatches):
                     fov_inx += 1
 
-                    H_range = range(ii * H_new, (ii + 1) * H_new)
-                    W_range = range(jj * W_new, (jj + 1) * W_new)
-                    # im = canvas[H_range, W_range]
-                    # im = im.reshape(H_new, W_new)
+                    #H_range = range(ii * H_new, (ii + 1) * H_new)
+                    #W_range = range(jj * W_new, (jj + 1) * W_new)
+
                     im = canvas2[ii * H_new:(ii + 1) * H_new, jj * W_new:(jj + 1) * W_new]
-                    # im = np.clip(im, 0, 2 ** param_dict['bitdepth'] - 1).astype(np.uint16)
 
                     x_name = str(i).zfill(5) + '_FOV_' + str(fov_inx).zfill(5) + '.tif'
 
@@ -1515,27 +1429,6 @@ def training_data_func(param_dict):
                         # print("Train batch z range [µm]:", xyz_ids_fov[:, 2].min(), xyz_ids_fov[:, 2].max())
                         #
                         labels_dict[x_name] = (xyz_ids_fov, blob3d_fov)
-
-            ''' old! 
-                    H_range = range(ii*H_new, (ii+1)*H_new)
-                    W_range = range(jj * W_new,(jj + 1) * W_new)
-                    #im = canvas[H_range, W_range]
-                    #im = im.reshape(H_new, W_new)
-                    im = canvas2[ii*H_new:(ii+1)*H_new, jj*W_new:(jj+1)*W_new]
-                    #im = np.clip(im, 0, 2 ** param_dict['bitdepth'] - 1).astype(np.uint16)
-
-                    x_name = str(i).zfill(5) + '_FOV_' + str(fov_inx).zfill(5) + '.tif'
-                    blob3d_fov = blob3d[xyz_ids[:,0]>H_range[0] ]
-                    xyz_ids_fov = xyz_ids[xyz_ids[:,0]>H_range[0] ]
-                    blob3d_fov = blob3d_fov[xyz_ids_fov[:,0]<H_range[-1] ]
-                    xyz_ids_fov = xyz_ids_fov[xyz_ids_fov[:,0]<H_range[-1] ]
-                    blob3d_fov = blob3d_fov[xyz_ids_fov[:,1]>W_range[0] ]
-                    xyz_ids_fov = xyz_ids_fov[xyz_ids_fov[:,1]>W_range[0] ]
-                    blob3d_fov = blob3d_fov[xyz_ids_fov[:,1]<W_range[-1] ]
-                    if np.shape(blob3d_fov)[0]>0:
-                        xyz_ids_fov = xyz_ids_fov[xyz_ids_fov[:,1]<W_range[-1] ]
-                        io.imsave(os.path.join(x_folder, x_name), im, check_contrast=False)
-                        labels_dict[x_name] = (xyz_ids_fov, blob3d_fov)'''
 
         # end ori's edit
 
@@ -1682,24 +1575,11 @@ def training_func(param_dict, training_dict):
     train_ds = MyDataset(x_folder, partition['train'], labels, cache_info=x_cache)
     # end change training data image reading
 
-    '''
-    # removed on 28/04/2026 to change training data image reading
-    x_folder = os.path.join(td_folder, 'x')
-    x_list = os.listdir(x_folder)
 
-    #num_tiles = 8
-    #x_list = x_list[:param_dict['n_ims']*num_tiles*num_tiles]  # only 1000 training out of the 5000 generated
-    #x_list = x_list[:1000]
-    num_x = len(x_list)
-    with open(os.path.join(td_folder, 'y.pickle'), 'rb') as handle:
-        labels = pickle.load(handle)
-
-    partition = {'train': x_list[:int(num_x * 0.9)], 'validate': x_list[int(num_x * 0.9):]}
-    train_ds = MyDataset(x_folder, partition['train'], labels)
-    # end removed 28/04/2026 to change training data image reading
-    '''
     # ori's edit to apply fov weightening 07/02/2027
-    apply_fov_reweighting = True
+    ''' 
+    # Fov reweightening feature - take into account more relevant sections. 
+    apply_fov_reweighting = False 
 
     if apply_fov_reweighting:
         # --- FOV reweighting: sample edge tiles more than center tiles (relative to central bead) ---
@@ -1711,10 +1591,6 @@ def training_func(param_dict, training_dict):
             # strength: 0 -> no effect, larger -> more edge emphasis
             alpha = float(param_dict.get("fov_reweight_alpha", 6.0))  # 2.0
             power = float(param_dict.get("fov_reweight_power", 2.0))  # 1.0
-
-            # max possible distance (to normalize)
-            # H_full, W_full = param_dict["H"], param_dict["W"]
-            # dmax = ((max(r_cb, H_full - 1 - r_cb)) ** 2 + (max(c_cb, W_full - 1 - c_cb)) ** 2) ** 0.5 + 1e-12
 
             weights = []
             for fname in partition["train"]:
@@ -1783,17 +1659,16 @@ def training_func(param_dict, training_dict):
             train_dl = DataLoader(train_ds, sampler=sampler, shuffle=False, **params_train)
         else:
             train_dl = DataLoader(train_ds, shuffle=True, **params_train)
-
-
+        
     else:
-        train_dl = DataLoader(train_ds, **params_train)
-
+        train_dl = DataLoader(train_ds, **params_train) '''
     # end ori's edit to apply fov weightening 07/02/2027
+
+    train_dl = DataLoader(train_ds, **params_train)
+
     # train_dl = DataLoader(train_ds, **params_train)  # removed on 07/02/2027.
 
-    validate_ds = MyDataset(x_folder, partition['validate'], labels,
-                            cache_info=x_cache)  # added on 28/04/2026 to change training data image reading
-    # validate_ds = MyDataset(x_folder, partition['validate'], labels)     # replaced on 28/04/2026 to change training data image reading
+    validate_ds = MyDataset(x_folder, partition['validate'], labels, cache_info=x_cache)  # added on 28/04/2026 to change training data image reading
 
     validate_dl = DataLoader(validate_ds, **params_validate)
 
@@ -1905,34 +1780,6 @@ def training_func(param_dict, training_dict):
     print(f'# of trainable parameters: {n_params}')
     # end
 
-    '''
-    #update: removed on 28/04/2026 to enable training resume
-    ## adding resume functionality 19/04/2026 (old version):
-    resume_file = training_dict.get('resume_net_file', None)
-
-    if resume_file is not None:
-        ckpt_path = os.path.join(path_save, resume_file)
-        checkpoint = torch.load(ckpt_path, map_location=device)
-
-        model = checkpoint['net']
-        model.load_state_dict(checkpoint['state_dict'])
-        model = model.to(device)
-
-        print(f'[resume] loaded checkpoint: {ckpt_path}')
-    else:
-        model = Net(D=D, us_factor=us_factor, maxv=maxv).to(device)
-        print('[resume] starting from scratch')
-    #end resume functionality
-
-    #model = Net(D=D, us_factor=us_factor, maxv=maxv).to(device)
-
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'# of trainable parameters: {n_params}')
-
-    optimizer = Adam(list(model.parameters()), lr=lr)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=1, verbose=True,
-                                  min_lr=1e-6)  # verbose True
-    '''
     # added on 19/04/2026
     tv_z_weight = 5e0 * 0  # first try 1e2?
     if param_dict['us_factor'] == 1:
@@ -1944,13 +1791,7 @@ def training_func(param_dict, training_dict):
             tv_z_weight=tv_z_weight
         )
     # end 19/04/2026
-    ''' removed on 19/04/2026
-    if param_dict['us_factor']==1:
-        # my_loss_func = torch.nn.MSELoss()
-        my_loss_func = KDE_loss3D(sigma=1.0, device=device)
-    else:
-        my_loss_func = KDE_loss3D(sigma=0.5*(param_dict['us_factor']/2), device=device)  # 0.5-2, 1.0-4
-    '''
+
     # added on 28/04/2026 to enable training resume
     trainer = TorchTrainer(model, my_loss_func, optimizer, lr_scheduler=scheduler, device=device)
 
@@ -2016,32 +1857,6 @@ def training_func(param_dict, training_dict):
 
     return net_file, fit_file
     # end
-    '''
-    # removed on 28/04/2026 to enable training resume
-    trainer = TorchTrainer(model, my_loss_func, optimizer, lr_scheduler=scheduler, device=device)
-
-    time_now = datetime.today().strftime('%m-%d_%H-%M')
-    net_file = 'net_' + time_now + '.pt'
-    checkpoints = dict(file_name=os.path.join(path_save, net_file),
-                       net=Net(D=D, us_factor=us_factor, maxv=maxv),
-                       state_dict=None,
-                       note=' '
-                       )
-
-    t0 = time.time()
-    fit_results = trainer.fit(train_dl, validate_dl, num_epochs=num_epochs, checkpoints=checkpoints, early_stopping=4)
-    fit_file = 'fit_' + time_now + '.pickle'
-    with open(os.path.join(path_save, fit_file), 'wb') as handle:
-        pickle.dump(fit_results, handle)
-
-    t1 = time.time()
-    print(f'training results in {net_file} and {fit_file}')
-    print(f'finished training in {t1 - t0}s.')
-
-    return net_file, fit_file
-
-    '''
-
 
 def inference_func1(param_dict, test_idx, fig_flag=True):  # simulation and try one exp image
 
@@ -2067,8 +1882,6 @@ def inference_func1(param_dict, test_idx, fig_flag=True):  # simulation and try 
             fit_result = pickle.load(handle)
 
     # training performance
-    # with open(os.path.join(path_save, fit_file), 'rb') as handle:
-    # fit_result = pickle.load(handle)
     train_loss = fit_result.train_loss
     test_loss = fit_result.test_loss
 
@@ -2259,112 +2072,15 @@ def inference_func1(param_dict, test_idx, fig_flag=True):  # simulation and try 
         plt.title('overlay')
         plt.axis('off')
         '''
-        plt.savefig('sim_im_gt_rec.jpg', bbox_inches='tight', dpi=300)
-        plt.clf()
+        # plt.savefig('sim_im_gt_rec.jpg', bbox_inches='tight', dpi=300) # from AutoDS3D. not validated yet
+        # plt.clf()
 
         print(f'Network inference on training tile: {sim_name}')
     # end
 
     # removed on 23/04/2026:
     # simulation
-    ''' # removed on 23/04/2026
-    xyzps, _, _ = sampling.xyzp_batch()
-    # ori's edit:
-    #im = model(torch.from_numpy(xyzps%(1400/8)).to(device)).cpu().numpy().astype(np.float32)
-    ##im = model(torch.from_numpy(xyzps).to(device)).cpu().numpy().astype(np.float32)
-    #end ori's edit
-    im = model(torch.from_numpy(xyzps).to(device)).cpu().numpy().astype(np.float32)
-    if param_dict['project_01']:
-        im = ((im - im.min()) / (im.max() - im.min()))
-    # ori's edit 09/12/2025 tile depend training
-    # --- NEW: build coord channels (treat this as whole camera) ---
-    H_sim, W_sim = im.shape
-    yy_sim, xx_sim = np.mgrid[0:H_sim, 0:W_sim]
-    Xmap_sim = (xx_sim / (W_sim - 1) * 2 - 1).astype(np.float32)
-    Ymap_sim = (yy_sim / (H_sim - 1) * 2 - 1).astype(np.float32)
-    im_sim_3 = np.stack([im, Xmap_sim, Ymap_sim], axis=0)  # (3,H,W)
 
-    with torch.no_grad():
-        net.eval()
-        vol = net(torch.from_numpy(im_sim_3[np.newaxis]).to(device))
-
-    xyz_rec, conf_rec = volume2xyz(vol)
-    #with torch.no_grad():
-    #    net.eval()
-    #    # ori's edit (not sure) 12/07/2025
-    #    #XX = im[0,:,:]
-    #    #vol = net(torch.from_numpy(XX[np.newaxis, np.newaxis, :, :]).to(device))
-    #    # end ori's edit
-    #    vol = net(torch.from_numpy(im[np.newaxis, np.newaxis, :, :]).to(device))
-    #xyz_rec, conf_rec = volume2xyz(vol)
-    #
-    # ori's edit
-    # after: xyz_rec, conf_rec = volume2xyz(vol)
-    #if xyz_rec is None or (hasattr(xyz_rec, "shape") and xyz_rec.shape[0] == 0):
-    #    print("No emitters detected in the simulated test image (xyz_rec=None). "
-    #          "Consider lowering `threshold` or using tiled inference. Skipping the simulated overlay.")
-    #else:
-    #    nphotons_rec = 1e4 * np.ones(xyz_rec.shape[0])
-    #    psfs_rec = model.get_psfs(torch.from_numpy(np.c_[xyz_rec, nphotons_rec]).to(device)).cpu().numpy()
-    #    # ... keep existing overlay code ...
-    #end ori's edit
-    #
-    if xyz_rec is not None:
-        xyz_gt = xyzps[:, :-1]
-        #jaccard_index, RMSE_xy, RMSE_z, _ = calc_jaccard_rmse(xyz_gt, xyz_rec, 0.1)
-        #jaccard_index, RMSE_xy, RMSE_z, _ = calc_jaccard_rmse(xyz_gt, xyz_rec, 0.11)  # ori's edit
-        jaccard_index, RMSE_xy, RMSE_z, _ = calc_jaccard_rmse(xyz_gt, xyz_rec, 30)  # ori's edit
-        jaccard_index, RMSE_xy, RMSE_z = np.round(jaccard_index, decimals=2), np.round(RMSE_xy*1000, decimals=2), np.round(RMSE_z*1000, decimals=2)
-
-        fig = plt.figure(figsize=(5, 4))
-        ax = fig.add_subplot(projection='3d')
-        ax.scatter(xyz_gt[:, 0], xyz_gt[:, 1], xyz_gt[:, 2], c='b', marker='o', label='GT', depthshade=False)
-        ax.scatter(xyz_rec[:, 0], xyz_rec[:, 1], xyz_rec[:, 2], c='r', marker='^', label='Rec', depthshade=False)
-        ax.set_xlabel('X [um]')
-        ax.set_ylabel('Y [um]')
-        ax.set_zlabel('Z [um]')
-        if RMSE_xy is not None:
-            plt.title(f'Found {xyz_rec.shape[0]} / {xyz_gt.shape[0]}, j_idx: {jaccard_index}, r_xy: {RMSE_xy} nm, r_z: {RMSE_z} nm')
-        else:
-            plt.title(f'Found {xyz_rec.shape[0]} emitters out of {xyz_gt.shape[0]}')
-        plt.legend()
-        plt.savefig('sim_loc_gt_rec.jpg', dpi=300)
-        plt.clf()
-
-        nphotons_rec = 1e4 * np.ones(xyz_rec.shape[0])
-        psfs_rec = model.get_psfs(torch.from_numpy(np.c_[xyz_rec, nphotons_rec]).to(device)).cpu().numpy()
-        im_rec = np.sum(psfs_rec, axis=0)
-        im_rec = (im_rec-im_rec.min())/(im_rec.max()-im_rec.min())
-        im = (im-im.min())/(im.max()-im.min())
-
-        fig = plt.figure(figsize=(9, 3))
-        plt.subplot(1, 3, 1)
-        plt.imshow(im, cmap='gray')
-        plt.title('im')
-        plt.axis('off')
-
-        plt.subplot(1, 3, 2)
-        plt.imshow(im_rec, cmap='gray')
-        plt.title('im_rec')
-        plt.axis('off')
-
-        mask = np.max(psfs_rec, axis=0)
-        mask = (mask-mask.min())/(mask.max()-mask.min())
-        mask = 1-mask
-        transparency = 0.2+mask*0.8
-        im_overlay = np.stack((im, im, im, transparency), axis=-1)
-        im_overlay[:, :, 1] = im_overlay[:, :, 1] * mask
-        plt.subplot(1, 3, 3)
-        plt.imshow(im_overlay)
-        plt.title('overlay')
-        plt.axis('off')
-
-        plt.savefig('sim_im_gt_rec.jpg', bbox_inches='tight', dpi=300)
-        plt.clf()
-
-        print('Network inference on simulated an image: sim_im_gt_rec.jpg')
-        # end removed on 23/04/2026
-        '''
 
     exp_imgs_path = param_dict['im_br_folder']
     img_names = sorted(os.listdir(exp_imgs_path))

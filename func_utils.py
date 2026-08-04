@@ -51,7 +51,7 @@ def func1(M, NA,  n_immersion, lamda, n_sample, f_4f, ps_camera, ps_BFP, externa
         r_bead=0.2,  # a default value, not critical
 
         #epoch_num=250//2,  # optimization iterations
-        epochs=250//4,  # optimization iterations
+        epochs=250//2,  # optimization iterations
         loss_label=1,  # 1: gauss log likelihood, 2: l2
         learning_rate=0.001,  # 0.005?
 
@@ -294,20 +294,16 @@ def func5(M, NA,  n_immersion, lamda, n_sample, f_4f, ps_camera, ps_BFP, externa
 
             training_dict = dict(
                 batch_size=16*2,
-                lr=0.005,  # 0.005?
-                #num_epochs=30,
+                lr=0.005,
+                num_epochs=30*1,
 
-                num_epochs=9*1,
-                # resume_net_file= 'net_04-27_00-55.pt'  #added resume functionality. 'None' is default!without "last" will only load weights
-                resume_net_file = 'last_net_08-03_12-35.pt' #added updated functionality. 'None' is default!
-                # resume_net_file = None  # added updated functionality. 'None' is default!
+                # resume_net_file = 'last_net_08-03_12-35.pt' #add "last_net file to resume checkpoint. 'None' is default!
+                resume_net_file = None  # added updated functionality. 'None' is default!
             )
 
             net_file, fit_file = training_func(param_dict, training_dict)
             param_dict['net_file'] = net_file
             param_dict['fit_file'] = fit_file
-            # param_dict['net_file'] = 'net_01-23_17-02.pt'  # for test
-            # param_dict['fit_file'] = 'fit_01-23_17-02.pickle'
 
             # save param_dict
             param_file_name = 'param_dict_' + net_file[4:-3] + '.pickle'

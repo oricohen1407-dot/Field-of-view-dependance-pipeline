@@ -90,8 +90,8 @@ training_im_size= 1200              # image size in pixel of trained image (imag
 us_factor       = 1                 # up-scaling factor. keep 1.
 num_tiles = 8 // 1                  # Training FOV tiling. value 8 means dividing the fov into 8x8 tiles
 max_num_particles = 15*(num_tiles**2)        # over the entire FOV trained image size.
-num_training_images = 1000          # number of full frame training images. number of tiles: (training_im_size^2 x num_tiles^2)
-test_idx        = 3000              # index of frame number used in test stage
+num_training_images = 100          # number of full frame training images. number of tiles: (training_im_size^2 x num_tiles^2)
+test_idx        = 30              # index of frame number used in test stage
 threshold       = 20              # localization intensity threshold.
 center_fraction = 0.75              # Fraction of each inference tile retained as the trusted central region. # Lower values increase overlap between neighboring tiles, used to prevent inter-tile artifacts
 
@@ -163,112 +163,49 @@ def run_step(step):
     save_state(state)
     print("\n=== STEP OUTPUT ===\n", msg)
 
+
+# ~~~~~~~~~~~~~~~~
+# =============================================================================
+# RUNNER
+# =============================================================================
+
+VALID_STEPS = {"psf", "preproc", "snr", "td", "train", "test", "localize"}
+def run_custom_steps(steps):
+    for step in steps:
+        if step not in VALID_STEPS:
+            raise ValueError(
+                f"Unknown step '{step}'. "
+                f"Allowed steps are: {sorted(VALID_STEPS)}"
+            )
+
+        print(f"\n~~~~~~~~~~~~~~~~~~~~~~ running {step} stage ~~~~~~~~~~~~~~~~~~~~~~")
+        run_step(step)
+
+
+# =============================================================================
+# RUN SETTINGS
+# =============================================================================
+# Choose the stages to run, in order.
+# In PyCharm: edit this list and press Run.
+#
+# Available stages:
+#   "psf"       - phase-mask / PSF calibration
+#   "preproc"   - background removal
+#   "snr"       - optional automatic SNR/noise estimation
+#   "td"        - synthetic training-data generation
+#   "train"     - network training
+#   "test"      - test reconstruction on one frame
+#   "localize"  - localization on the experimental movie
+#
+# Examples:
+#   CUSTOM_STEPS = ["psf"]
+#   CUSTOM_STEPS = ["td", "train"]
+#   CUSTOM_STEPS = ["train", "test", "localize"]
+#   CUSTOM_STEPS = ["psf", "preproc", "snr", "td", "train", "test", "localize"]
+
+CUSTOM_STEPS = ["psf", "preproc", "snr", "td", "train", "test", "localize"]
+
 if __name__ == "__main__":
-    run_all = False
-    startFromSNR = True  # only if "start from training" is false
-    StartFromTraining = True
-
-    import argparse
-
-    if not run_all:
-        p = argparse.ArgumentParser(description="Debug AutoDS3D pipeline without GUI")
-        p.add_argument("--step",
-                       choices=["psf", "preproc", "snr", "td", "train", "test", "localize", "all"],
-                       default="psf",   # <-- default if omitted
-                       help="Which pipeline step to run")
-        args = p.parse_args()
-        run_step(args.step)
-
-    else:
-        if not StartFromTraining:
-            if not startFromSNR:
-                p = argparse.ArgumentParser(description="Debug AutoDS3D pipeline without GUI")
-                print(" ~~~~~~~~~~~~~~~~~~~~~~ running psf stage ~~~~~~~~~~~~~~~~~~~~~~~~")
-                p.add_argument("--step",
-                               choices=["psf","preproc","snr","td","train","test","localize","all"],
-                               default="psf",   # <-- default if omitted
-                               help="Which pipeline step to run")
-                args = p.parse_args()
-                run_step(args.step)
-
-                print(" ~~~~~~~~~~~~~~~~~~~~~~ running preproc stage ~~~~~~~~~~~~~~~~~~~~~~~~")
-                p = argparse.ArgumentParser(description="Debug AutoDS3D pipeline without GUI")
-                p.add_argument("--step",
-                               choices=["psf","preproc","snr","td","train","test","localize","all"],
-                               default="preproc",   # <-- default if omitted
-                               help="Which pipeline step to run")
-                args = p.parse_args()
-                run_step(args.step)
-
-
-            print(" ~~~~~~~~~~~~~~~~~~~~~~~ running snr stage ~~~~~~~~~~~~~~~~~~~~~~~~")
-            p = argparse.ArgumentParser(description="Debug AutoDS3D pipeline without GUI")
-            p.add_argument("--step",
-                           choices=["psf","preproc","snr","td","train","test","localize","all"],
-                           default="snr",   # <-- default if omitted
-                           help="Which pipeline step to run")
-            args = p.parse_args()
-            run_step(args.step)
-
-            print(" ~~~~~~~~~~~~~~~~~~~~~~ running training data (td) stage ~~~~~~~~~~~~~~~~~~~~~~~~")
-            p = argparse.ArgumentParser(description="Debug AutoDS3D pipeline without GUI")
-            p.add_argument("--step",
-                           choices=["psf","preproc","snr","td","train","test","localize","all"],
-                           default="td",   # <-- default if omitted
-                           help="Which pipeline step to run")
-            args = p.parse_args()
-            run_step(args.step)
-        else:
-            print(" ~~~~~~~~~~~~~~~~~~~~~~ Starting from traing stage! ~~~~~~~~~~~~~~~~~~~~~~~~")
-
-
-        print(" ~~~~~~~~~~~~~~~~~~~~~~ running train stage ~~~~~~~~~~~~~~~~~~~~~~~~")
-        p = argparse.ArgumentParser(description="Debug AutoDS3D pipeline without GUI")
-        p.add_argument("--step",
-                       choices=["psf","preproc","snr","td","train","test","localize","all"],
-                       default="train",   # <-- default if omitted
-                       help="Which pipeline step to run")
-        args = p.parse_args()
-        run_step(args.step)
-        # '''
-        try:
-            print(" ~~~~~~~~~~~~~~~~~~~~~~ running test stage ~~~~~~~~~~~~~~~~~~~~~~~~")
-            p = argparse.ArgumentParser(description="Debug AutoDS3D pipeline without GUI")
-            p.add_argument("--step",
-                           choices=["psf","preproc","snr","td","train","test","localize","all"],
-                           default="test",   # <-- default if omitted
-                           help="Which pipeline step to run")
-            args = p.parse_args()
-            run_step(args.step)
-
-        except:
-                  print('failed to run test. running localization')
-
-        import time
-
-        print(" ~~~~~~~~~~~~~~~~~~~~~~ running localization stage ~~~~~~~~~~~~~~~~~~~~~~~~")
-        iter = 0
-        tryLoopsNum = 3
-        TryLoopsFlag = True
-        while iter<tryLoopsNum and TryLoopsFlag:
-            p = argparse.ArgumentParser(description="Debug AutoDS3D pipeline without GUI")
-            iter += 1
-            TryLoopsFlag = False
-            try:
-                print("Execution paused for 5 seconds.")
-                time.sleep(5)  # Pause for 5 seconds
-                print("Execution resumed after 5 seconds.")
-                print(" try {" + str(iter) +"} to execute localization")
-
-                p.add_argument("--step",
-                               choices=["psf","preproc","snr","td","train","test","localize","all"],
-                               default="localize",   # <-- default if omitted
-                               help="Which pipeline step to run")
-                args = p.parse_args()
-                run_step(args.step)
-
-            except:
-                TryLoopsFlag = True
-
+    run_custom_steps(CUSTOM_STEPS)
 
 
