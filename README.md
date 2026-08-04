@@ -463,19 +463,12 @@ The value should be between 0 and 1. Reducing `center_fraction` increases overla
 
 If this code is used in a publication, cite the associated manuscript/preprint and the original AutoDS3D work on which the neural-network localization framework is based.
 
-Suggested placeholder:
-
 ```text
 Author list. Plug-and-play 3D localization microscopy with field-dependent reconstruction. bioRxiv, YEAR.
 ```
 
 ---
 
-## License
-
-Add the repository license here. If no license is provided, the code should be considered unavailable for reuse without permission from the authors.
-
----
 
 ## Contact
 
