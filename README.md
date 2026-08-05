@@ -1,10 +1,6 @@
 [README.md](https://github.com/user-attachments/files/30707978/README.md)
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/5cef3014-fb7b-46d9-aae9-f7ef563285fc" alt="Plug-and-Plane SMLM showoff" width="100%" />
-</p>
 # FOV-dependent 3D SMLM Reconstruction with Displaced-Mask PSF Engineering
-
+![Plug-and-Plane SMLM showoff](https://github.com/user-attachments/assets/5cef3014-fb7b-46d9-aae9-f7ef563285fc)
 This repository contains a field-of-view-aware 3D single-molecule localization microscopy (SMLM) reconstruction pipeline. It was developed for experiments in which a phase mask is placed in an arbitrary plane between the objective lens and the tube lens, displaced from the shift-invariant conjugate Fourier/pupil plane. In this configuration, the engineered point-spread function (PSF) can depend on the emitter position in the camera field of view.
 
 The workflow combines bead-based calibration of a displaced phase-mask with optical forward model, synthetic training-data generation, neural-network training, and localization of experimental blinking data.
