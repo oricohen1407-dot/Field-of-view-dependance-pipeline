@@ -1,6 +1,6 @@
 [README.md](https://github.com/user-attachments/files/30707978/README.md)
-<img width="533" height="240" alt="Plug-and-Plane SMLM showoff" autoplay loop muted playsinline width="100%" src="https://github.com/user-attachments/assets/5cef3014-fb7b-46d9-aae9-f7ef563285fc" />
 
+<img src="https://github.com/user-attachments/assets/5cef3014-fb7b-46d9-aae9-f7ef563285fc" alt="Plug-and-Plane SMLM showoff" width="100%" />
 
 # FOV-dependent 3D SMLM Reconstruction with Displaced-Mask PSF Engineering
 
