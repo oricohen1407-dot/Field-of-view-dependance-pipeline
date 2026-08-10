@@ -1,0 +1,17 @@
+# Core
+torch          # install the build matching your CUDA/CPU setup: https://pytorch.org/get-started/locally/
+numpy
+scipy
+scikit-learn
+scikit-image
+
+# Visualization / UI
+matplotlib
+gradio
+
+# Image/File handling
+pillow
+tifffile       # TIFF backend used by skimage.io for the bead z-stacks
+
+# Utilities
+tqdm
