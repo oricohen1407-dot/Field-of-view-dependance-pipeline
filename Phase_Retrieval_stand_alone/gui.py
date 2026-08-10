@@ -64,7 +64,7 @@ def _build_live_figure(live_box: dict):
         return None
     meta = live_box.get('meta', {})
     n_panels = 3 if target is not None else 2
-    fig = Figure(figsize=(15 if n_panels == 3 else 10, 4))
+    fig = Figure(figsize=(15 if n_panels == 3 else 10, 4), constrained_layout=True)
     FigureCanvasAgg(fig)
 
     ax1 = fig.add_subplot(1, n_panels, 1)
@@ -92,7 +92,6 @@ def _build_live_figure(live_box: dict):
         f"y={meta.get('y', float('nan')):.3f} z={meta.get('z', float('nan')):.3f}  "
         f"NFP={meta.get('nfp', float('nan')):.3f}"
     )
-    fig.tight_layout()
     return fig
 
 
@@ -338,7 +337,8 @@ def build_demo() -> gr.Blocks:
         with gr.Row():
             run_btn = gr.Button("Run Characterize PSF", variant="primary")
             stop_btn = gr.Button("Stop", variant="stop", interactive=False)
-        live_plot = gr.Plot(label="Latest debug snapshot (live)")
+        gr.Markdown("**Latest debug snapshot (live)**")
+        live_plot = gr.Plot(show_label=False)
         log_out = gr.Textbox(label="Output Log", lines=20, interactive=False)
 
         # component list — order MUST match config_to_fields / fields_to_config

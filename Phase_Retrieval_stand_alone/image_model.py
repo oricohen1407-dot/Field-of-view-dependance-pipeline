@@ -133,7 +133,6 @@ class ImModel_pr(torch.nn.Module):
         self.debug_dir = str(params.get("debug_dir", os.path.join("debug", "bfp")))
         self.debug_max_emitters = int(params.get("debug_max_emitters", 5 ))  # save first K in batch  number of beads
         self.live_box = params.get("live_box")  # optional dict for live GUI preview (gui.py); None outside the GUI
-        self.debug_targets = params.get("debug_targets")  # optional [B,H,W] experimental PSFs, same batch order as forward()'s xyzps/NFPs, for debug/live-panel comparison
         self._debug_call_idx = 0
         phase_mask_init = params.get('phase_mask_init')
         if phase_mask_init is not None:
@@ -148,7 +147,7 @@ class ImModel_pr(torch.nn.Module):
         # bounded to [d_min_um, d_max_um]
         return self.d_min_um + (self.d_max_um - self.d_min_um) * torch.sigmoid(self.d_raw)
 
-    def _maybe_save_debug(self, ef_bfp_eff, psfs, xyzps, NFPs):
+    def _maybe_save_debug(self, ef_bfp_eff, psfs, xyzps, NFPs, targets=None):
         if not self.debug_bfp:
             return
 
@@ -192,8 +191,8 @@ class ImModel_pr(torch.nn.Module):
 
             # experimental (ground-truth) PSF this prediction is trying to match, if available
             target_disp = None
-            if self.debug_targets is not None and inx < self.debug_targets.shape[0]:
-                target = self.debug_targets[inx].detach().cpu().numpy()
+            if targets is not None and inx < targets.shape[0]:
+                target = targets[inx].detach().cpu().numpy()
                 target_disp = target / (target.max() + 1e-12)
 
             # xyz + nfp for title
@@ -216,7 +215,7 @@ class ImModel_pr(torch.nn.Module):
                 self.live_box['version'] = self.live_box.get('version', 0) + 1
 
             n_panels = 3 if target_disp is not None else 2
-            fig = plt.figure(figsize=(15 if n_panels == 3 else 10, 4))
+            fig = plt.figure(figsize=(15 if n_panels == 3 else 10, 4), constrained_layout=True)
 
             ax1 = fig.add_subplot(1, n_panels, 1)
             im1 = ax1.imshow(phase_eff, cmap="twilight")
@@ -241,13 +240,11 @@ class ImModel_pr(torch.nn.Module):
                 f"call={self._debug_call_idx}  d={d_now:.1f}um  g={g_now:.3f}  "
                 f"x={x_um:.3f} y={y_um:.3f} z={z_um:.3f}  NFP={nfp:.3f}"
             )
-            fig.tight_layout()
-
             out = os.path.join(subdir, f"call_{self._debug_call_idx:06d}.png")
             fig.savefig(out, dpi=200, bbox_inches="tight")
             plt.close(fig)
 
-    def forward(self, xyzps, NFPs):
+    def forward(self, xyzps, NFPs, targets=None):
 
         def shift2d_integer(img2d: torch.Tensor, shift_x_px: int, shift_y_px: int):
             """
@@ -401,6 +398,6 @@ class ImModel_pr(torch.nn.Module):
 
         # debug
         if self.debug_bfp:
-            self._maybe_save_debug(ef_bfp_after, psfs, xyzps, NFPs)
+            self._maybe_save_debug(ef_bfp_after, psfs, xyzps, NFPs, targets)
 
         return psfs

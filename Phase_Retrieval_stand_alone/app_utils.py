@@ -210,7 +210,6 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     params_pr = dict(param_dict)
     params_pr['H'] = int(Hroi)
     params_pr['W'] = int(Wroi)
-    params_pr['debug_targets'] = y_true  # experimental PSF per sample, for debug/live-panel comparison
 
     # initial d: explicit Config override > warm start from a prior run > bounds midpoint
     d_init_um = param_dict['d_init_um']
@@ -264,7 +263,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         apply_off_axis_space_invariance = (max_shift_px > 0)
 
         if not apply_off_axis_space_invariance:
-            pred = im_model(xyzps, NFPs)  #original
+            pred = im_model(xyzps, NFPs, targets=y_true)  #original
             loss = F.mse_loss(pred, y_true)  #original
             # added on 15/03/2026 for small defocus robustness in pr
         else:
@@ -294,7 +293,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
 
                     for dd in delta_candidates:
                         nfp_cand = NFPs[idx] + float(dd)
-                        pred_cand = im_model(xyzps[idx], nfp_cand)  # [Z,H,W] removed on 15/03/2026
+                        pred_cand = im_model(xyzps[idx], nfp_cand, targets=target_bead)  # [Z,H,W] removed on 15/03/2026
 
 
 
@@ -385,7 +384,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
                     ''' # replaced
 
             # forward again WITH grad, using the chosen per-bead fine defocus
-            pred = im_model(xyzps, NFPs + nfp_offsets)
+            pred = im_model(xyzps, NFPs + nfp_offsets, targets=y_aligned)
 
             eps = 1e-12
             pred_n = pred / (pred.sum(dim=(1, 2), keepdim=True) + eps)
@@ -431,7 +430,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
 
         # monitor
         with torch.no_grad():
-            pred2 = im_model(xyzps, NFPs)
+            pred2 = im_model(xyzps, NFPs, targets=y_true)
             cc = calculate_cc(pred2.detach().cpu().numpy(), y_true.detach().cpu().numpy())
             ccs.append(cc)
 
@@ -523,10 +522,9 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     #xyz_mid[:,1]  =  xyz_mid[:,1] * 100
 
     NFPs_mid = NFPs[idxs]
-    im_model.debug_targets = y_true[idxs]
 
     with torch.no_grad():
-        _ = im_model(xyz_mid, NFPs_mid)  # triggers _maybe_save_debug once
+        _ = im_model(xyz_mid, NFPs_mid, targets=y_true[idxs])  # triggers _maybe_save_debug once
 
     return phase_mask, g_sigma, ccs
 
