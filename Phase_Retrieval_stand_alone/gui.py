@@ -7,6 +7,8 @@ import threading
 from pathlib import Path
 
 import gradio as gr
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from config.config import Config, UserConfig, AdvancedConfig
 from config.emitter_centers import (
@@ -47,6 +49,51 @@ class _StreamToQueue(io.TextIOBase):
 
     def flush(self):
         pass
+
+
+def _build_live_figure(live_box: dict):
+    """Build the BFP-phase/PSF panel from the latest ImModel_pr._maybe_save_debug snapshot.
+
+    Uses the matplotlib object-oriented API + an explicit Agg canvas (no pyplot global state),
+    since this runs on the GUI polling thread while the training worker thread makes its own
+    bare plt.* calls (phase_retrieval_with_displacement_iteration/iteration_<epoch>.jpg) — sharing
+    pyplot's global figure stack across threads would race.
+    """
+    phase, psf, target = live_box.get('phase'), live_box.get('psf'), live_box.get('target')
+    if phase is None or psf is None:
+        return None
+    meta = live_box.get('meta', {})
+    n_panels = 3 if target is not None else 2
+    fig = Figure(figsize=(15 if n_panels == 3 else 10, 4))
+    FigureCanvasAgg(fig)
+
+    ax1 = fig.add_subplot(1, n_panels, 1)
+    im1 = ax1.imshow(phase, cmap="twilight")
+    ax1.set_title("effective BFP phase")
+    ax1.axis("off")
+    fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+
+    ax2 = fig.add_subplot(1, n_panels, 2)
+    im2 = ax2.imshow(psf, cmap="gray")
+    ax2.set_title("PSF (display norm)")
+    ax2.axis("off")
+    fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+
+    if target is not None:
+        ax3 = fig.add_subplot(1, n_panels, 3)
+        im3 = ax3.imshow(target, cmap="gray")
+        ax3.set_title("experimental PSF (target)")
+        ax3.axis("off")
+        fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+
+    fig.suptitle(
+        f"call={meta.get('call_idx', '?')}  d={meta.get('d', float('nan')):.1f}um  "
+        f"g={meta.get('g', float('nan')):.3f}  x={meta.get('x', float('nan')):.3f} "
+        f"y={meta.get('y', float('nan')):.3f} z={meta.get('z', float('nan')):.3f}  "
+        f"NFP={meta.get('nfp', float('nan')):.3f}"
+    )
+    fig.tight_layout()
+    return fig
 
 
 # ── Config ↔ field helpers ────────────────────────────────────────────────────
@@ -288,7 +335,10 @@ def build_demo() -> gr.Blocks:
                 a_dbg_max  = gr.Textbox(label="debug_max_emitters (empty=auto)", value=defaults[43])
 
         # ── Run ──────────────────────────────────────────────────────────────
-        run_btn = gr.Button("Run Characterize PSF", variant="primary")
+        with gr.Row():
+            run_btn = gr.Button("Run Characterize PSF", variant="primary")
+            stop_btn = gr.Button("Stop", variant="stop", interactive=False)
+        live_plot = gr.Plot(label="Latest debug snapshot (live)")
         log_out = gr.Textbox(label="Output Log", lines=20, interactive=False)
 
         # component list — order MUST match config_to_fields / fields_to_config
@@ -308,6 +358,11 @@ def build_demo() -> gr.Blocks:
             a_dbg_bfp, a_dbg_ev, a_dbg_max,
         ]
 
+        # runtime-only state shared between run_handler and stop_handler — not part of Config,
+        # never persisted. "busy" is an explicit one-run-at-a-time guard, kept even though
+        # demo.queue()'s default concurrency_limit=1 already serializes Run clicks process-wide.
+        _run_state = {"stop_event": None, "busy": False}
+
         # ── Handlers ─────────────────────────────────────────────────────────
 
         def load_handler(filepath):
@@ -324,11 +379,25 @@ def build_demo() -> gr.Blocks:
             except Exception as exc:
                 return f"[ERROR] {exc}"
 
+        def stop_handler():
+            if _run_state["stop_event"] is not None:
+                _run_state["stop_event"].set()
+                gr.Info(
+                    "Stop requested — finishing the current epoch and saving results. "
+                    "This can take a little while.",
+                    duration=6,
+                )
+            return gr.update(value="⏳ Stopping…", interactive=False)
+
         def run_handler(*vals):
+            if _run_state["busy"]:
+                yield "[ERROR] A run is already in progress.", gr.skip(), gr.update(interactive=False), gr.update(interactive=True)
+                return
+
             try:
                 cfg = fields_to_config(*vals)
             except Exception as exc:
-                yield f"[CONFIG ERROR] {exc}"
+                yield f"[CONFIG ERROR] {exc}", gr.skip(), gr.update(interactive=True), gr.update(interactive=False)
                 return
 
             q: queue.SimpleQueue = queue.SimpleQueue()
@@ -336,39 +405,63 @@ def build_demo() -> gr.Blocks:
             sys.stdout = _StreamToQueue(q)
             done_evt = threading.Event()
             run_error: list = [None]
+            live_box: dict = {}
+            stop_event = threading.Event()
+            _run_state["stop_event"] = stop_event
+            _run_state["busy"] = True
 
             def _worker():
                 try:
-                    characterize_PSF(cfg)
+                    characterize_PSF(cfg, live_box=live_box, stop_event=stop_event)
                 except Exception as exc:
                     q.put(f"\n[EXCEPTION] {exc}\n")
                     run_error[0] = exc
                 finally:
                     sys.stdout = old_stdout
+                    _run_state["busy"] = False
                     done_evt.set()
 
             threading.Thread(target=_worker, daemon=True).start()
 
             log = ""
+            last_seen_version = 0
             while True:
                 try:
                     chunk = q.get(timeout=0.2)
                     log += chunk
-                    yield log
                 except queue.Empty:
                     if done_evt.is_set():
                         break
-                    yield log  # heartbeat keeps the WebSocket alive
+                    # heartbeat keeps the WebSocket alive — fall through to yield below
+
+                version = live_box.get("version", 0)
+                if version != last_seen_version:
+                    last_seen_version = version
+                    plot_update = _build_live_figure(live_box)
+                else:
+                    plot_update = gr.skip()
+                # once Stop has been clicked, stop_handler already set the "Stopping…" label —
+                # keep the button disabled (don't touch its value) instead of re-enabling it
+                stop_btn_update = gr.skip() if stop_event.is_set() else gr.update(interactive=True)
+                yield log, plot_update, gr.update(interactive=False), stop_btn_update
 
             while not q.empty():
                 log += q.get_nowait()
 
+            version = live_box.get("version", 0)
+            if version != last_seen_version:
+                plot_update = _build_live_figure(live_box)
+            else:
+                plot_update = gr.skip()
+
+            _run_state["stop_event"] = None
             log += "\n\n--- DONE ---" if run_error[0] is None else f"\n\n--- FAILED: {run_error[0]} ---"
-            yield log
+            yield log, plot_update, gr.update(interactive=True), gr.update(value="Stop", interactive=False)
 
         load_file.change(fn=load_handler, inputs=load_file, outputs=all_fields)
         save_btn.click(fn=save_handler, inputs=all_fields, outputs=save_status)
-        run_btn.click(fn=run_handler, inputs=all_fields, outputs=log_out)
+        run_btn.click(fn=run_handler, inputs=all_fields, outputs=[log_out, live_plot, run_btn, stop_btn])
+        stop_btn.click(fn=stop_handler, outputs=stop_btn)
 
     demo.queue()
     return demo

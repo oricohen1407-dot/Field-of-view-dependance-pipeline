@@ -42,9 +42,14 @@ def _load_external_mask(path: str, expected_shape: tuple) -> np.ndarray:
     return mask.astype(np.float32)
 
 
-def characterize_PSF(cfg: Config):
+def characterize_PSF(cfg: Config, live_box=None, stop_event=None):
     param_dict = cfg.generate_param_dict()
     pr_dict = cfg.generate_pr_dict()
+
+    if live_box is not None:
+        param_dict['live_box'] = live_box
+    if stop_event is not None:
+        param_dict['stop_event'] = stop_event
 
     device = torch.device(param_dict['device'] if torch.cuda.is_available() else 'cpu')
     param_dict['device'] = device

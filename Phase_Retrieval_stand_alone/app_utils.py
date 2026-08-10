@@ -210,9 +210,23 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     params_pr = dict(param_dict)
     params_pr['H'] = int(Hroi)
     params_pr['W'] = int(Wroi)
+    params_pr['debug_targets'] = y_true  # experimental PSF per sample, for debug/live-panel comparison
 
-    # initial d:
-    params_pr['mask_offset_in_um'] = float(param_dict.get("mask_offset_in_um", 0.0))
+    # initial d: explicit Config override > warm start from a prior run > bounds midpoint
+    d_init_um = param_dict['d_init_um']
+    if d_init_um is None:
+        d_init_um = param_dict.get('mask_offset_in_um')  # warm start, e.g. resuming a prior fit
+    if d_init_um is None:
+        d_init_um = 0.5 * (param_dict['d_min_um'] + param_dict['d_max_um'])
+    d_init_um = float(d_init_um)
+
+    if not (param_dict['d_min_um'] <= d_init_um <= param_dict['d_max_um']):
+        raise ValueError(
+            f"d_init_um={d_init_um} must be inside "
+            f"[{param_dict['d_min_um']}, {param_dict['d_max_um']}]."
+        )
+
+    params_pr['mask_offset_in_um'] = d_init_um
     # end ori's edit from 26/01/2026 for improved pr with displacement
 
     im_model = ImModel_pr(params_pr).to(device)
@@ -241,7 +255,11 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         dtype=np.float32
     )
     # end
+    stop_event = param_dict.get('stop_event')
     for epoch in range(pr_dict['epochs']):
+        if stop_event is not None and stop_event.is_set():
+            print(f"[PR] stop requested — halting at epoch {epoch}")
+            break
         opt.zero_grad()
         apply_off_axis_space_invariance = (max_shift_px > 0)
 
@@ -505,6 +523,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     #xyz_mid[:,1]  =  xyz_mid[:,1] * 100
 
     NFPs_mid = NFPs[idxs]
+    im_model.debug_targets = y_true[idxs]
 
     with torch.no_grad():
         _ = im_model(xyz_mid, NFPs_mid)  # triggers _maybe_save_debug once

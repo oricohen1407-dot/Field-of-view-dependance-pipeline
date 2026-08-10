@@ -31,7 +31,7 @@ class ImModel_pr(torch.nn.Module):
         # ---- learnable d (mask displacement) ----
         self.d_min_um = params["d_min_um"]
         self.d_max_um = params["d_max_um"]
-        d_init = params.get("mask_offset_in_um", 0.5 * (self.d_min_um + self.d_max_um))
+        d_init = params["mask_offset_in_um"]
 
         self.centralBeadCoordinates_pixel = list(params['centralBeadCoordinates_pixel'])
         self.NFP = params['NFP']  # location of the nominal focal plane
@@ -132,6 +132,8 @@ class ImModel_pr(torch.nn.Module):
         self.debug_every = int(params.get("debug_every", 500//2))  # every N forward calls
         self.debug_dir = str(params.get("debug_dir", os.path.join("debug", "bfp")))
         self.debug_max_emitters = int(params.get("debug_max_emitters", 5 ))  # save first K in batch  number of beads
+        self.live_box = params.get("live_box")  # optional dict for live GUI preview (gui.py); None outside the GUI
+        self.debug_targets = params.get("debug_targets")  # optional [B,H,W] experimental PSFs, same batch order as forward()'s xyzps/NFPs, for debug/live-panel comparison
         self._debug_call_idx = 0
         phase_mask_init = params.get('phase_mask_init')
         if phase_mask_init is not None:
@@ -188,25 +190,52 @@ class ImModel_pr(torch.nn.Module):
             psf = psfs[inx].detach().cpu().numpy()
             psf_disp = psf / (psf.max() + 1e-12)
 
+            # experimental (ground-truth) PSF this prediction is trying to match, if available
+            target_disp = None
+            if self.debug_targets is not None and inx < self.debug_targets.shape[0]:
+                target = self.debug_targets[inx].detach().cpu().numpy()
+                target_disp = target / (target.max() + 1e-12)
+
             # xyz + nfp for title
             x_um = float(xyzps[inx, 0].detach().cpu().item())
             y_um = float(xyzps[inx, 1].detach().cpu().item())
             z_um = float(xyzps[inx, 2].detach().cpu().item())
             nfp = float(NFPs[inx].detach().cpu().item()) if NFPs is not None else float("nan")
 
-            fig = plt.figure(figsize=(10, 4))
+            if self.live_box is not None and i == 0:
+                self.live_box['phase'] = phase_eff
+                self.live_box['psf'] = psf_disp
+                self.live_box['target'] = target_disp
+                self.live_box['meta'] = {
+                    'call_idx': self._debug_call_idx,
+                    'd': d_now, 'g': g_now,
+                    'x': x_um, 'y': y_um, 'z': z_um, 'nfp': nfp,
+                }
+                # 'version' must be written last: under the GIL, a reader that observes a new
+                # version has already seen the fully-written phase/psf/meta above (single writer, no lock)
+                self.live_box['version'] = self.live_box.get('version', 0) + 1
 
-            ax1 = fig.add_subplot(1, 2, 1)
+            n_panels = 3 if target_disp is not None else 2
+            fig = plt.figure(figsize=(15 if n_panels == 3 else 10, 4))
+
+            ax1 = fig.add_subplot(1, n_panels, 1)
             im1 = ax1.imshow(phase_eff, cmap="twilight")
             ax1.set_title("effective BFP phase")
             ax1.axis("off")
             fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
 
-            ax2 = fig.add_subplot(1, 2, 2)
+            ax2 = fig.add_subplot(1, n_panels, 2)
             im2 = ax2.imshow(psf_disp, cmap="gray")
             ax2.set_title("PSF (display norm)")
             ax2.axis("off")
             fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+
+            if target_disp is not None:
+                ax3 = fig.add_subplot(1, n_panels, 3)
+                im3 = ax3.imshow(target_disp, cmap="gray")
+                ax3.set_title("experimental PSF (target)")
+                ax3.axis("off")
+                fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
 
             fig.suptitle(
                 f"call={self._debug_call_idx}  d={d_now:.1f}um  g={g_now:.3f}  "

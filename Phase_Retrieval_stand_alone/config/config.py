@@ -64,8 +64,8 @@ class AdvancedConfig:
     r_bead: float = 0.02         # bead radius (um)
     adam_betas: tuple = (0.9, 0.99)   # Adam (beta1, beta2)
     lr_phase_mult: float = 100000     # phase mask LR = lr_phase_mult * learning_rate
-    lr_sigma_mult: float = 0          # g_sigma LR multiplier; 0 = frozen
-    lr_d_mult: float = 500            # mask displacement LR = lr_d_mult * learning_rate
+    lr_sigma_mult: float = 1          # g_sigma LR multiplier; matches root pipeline default (lr_sigma = learning_rate)
+    lr_d_mult: float = 1000           # mask displacement LR = lr_d_mult * learning_rate; matches root pipeline default
 
     # --- Per-bead fine alignment ---
     fine_defocus_range_um: float = 0.2
@@ -78,6 +78,7 @@ class AdvancedConfig:
     circ_scale: float = 5.3/5.8  # aperture scaling; tuned 26/01/2026
     d_min_um: float = 15000      # mask displacement lower bound (um)
     d_max_um: float = 30000      # mask displacement upper bound (um)
+    d_init_um: Optional[float] = None   # initial guess for d; None = midpoint of [d_min_um, d_max_um]
 
     # --- Camera / noise ---
     bitdepth: int = 16
@@ -120,7 +121,7 @@ class Config:
             # model internals
             'g_sigma': a.g_sigma, 'g_size': a.g_size,
             'circ_scale': a.circ_scale,
-            'd_min_um': a.d_min_um, 'd_max_um': a.d_max_um,
+            'd_min_um': a.d_min_um, 'd_max_um': a.d_max_um, 'd_init_um': a.d_init_um,
             # camera / noise
             'bitdepth': a.bitdepth,
             'baseline': a.baseline, 'read_std': a.read_std, 'bg': a.bg,
