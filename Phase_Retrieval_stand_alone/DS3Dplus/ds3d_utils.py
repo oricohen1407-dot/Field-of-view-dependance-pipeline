@@ -22,6 +22,19 @@ import torch.nn.functional as F
 import numpy as np
 from math import pi
 
+
+def select_device() -> torch.device:
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            candidate = torch.device(f"cuda:{i}")
+            try:
+                torch.zeros(1, device=candidate)
+                return candidate
+            except Exception:
+                continue
+    return torch.device("cpu")
+
+
 def _shift2d_subpixel(img2d, shift_x_px, shift_y_px):
     """
     img2d: (N,N) or (1,1,N,N) float tensor
@@ -219,11 +232,6 @@ class ImModel(nn.Module):
         NFPgrid = k_immersion * (-1) * cos_theta_immersion  # -1
 
         self.device = device
-        # ori's edit
-        device = torch.device(
-            "cuda:3" if torch.cuda.is_available() else "cpu")  # GPU device cuda:0, cuda:1, cuda:2 or cuda:3
-        print(f'device used (ImModel): {device}')
-        # end ori's edit
         self.Xgrid = torch.from_numpy(Xgrid).to(device)
         self.Ygrid = torch.from_numpy(Ygrid).to(device)
         self.Zgrid = torch.from_numpy(Zgrid).to(device)
@@ -528,11 +536,6 @@ class ImModelBase(nn.Module):
 
         ################### set parameters: unit:um
         device = params['device']
-        # ori's edit
-        device = torch.device(
-            "cuda:3" if torch.cuda.is_available() else "cpu")  # GPU device cuda:0, cuda:1, cuda:2 or cuda:3
-        print(f'device used (ImModelBase): {device}')
-        # end ori's edit
         M = params['M']  # magnification
         NA = params['NA']  # NA
         n_immersion = params['n_immersion']  # refractive index of the immersion of the objective
@@ -591,10 +594,6 @@ class ImModelBase(nn.Module):
 
         self.x_ang = x_ang
         self.device = device
-        # ori's edit
-        self.device = torch.device(
-            "cuda:3" if torch.cuda.is_available() else "cpu")  # GPU device cuda:0, cuda:1, cuda:2 or cuda:3
-        print(f'device used (ImModelBase): {self.device}')
         #self.centralBeadCoordinates_pixel = [849, 854]  # test2 - Should be like in ImModelTraining __init__
         #self.centralBeadCoordinates_pixel = [965, 753]  #Fov6 Should be like in ImModelTraining __init__
         #self.centralBeadCoordinates_pixel = [562, 600]  # Mitochondria_flat_from_January2026
@@ -1750,11 +1749,6 @@ class Volume2XYZ(nn.Module):
         self.zrange = params['zrange']
         self.threshold = params['threshold']
         self.device = params['device']
-        # ori's edit
-        self.device = torch.device(
-            "cuda:3" if torch.cuda.is_available() else "cpu")  # GPU device cuda:0, cuda:1, cuda:2 or cuda:3
-        print(f'device used (Volume2XYZ): {self.device}')
-        # end ori's edit
 
         self.r = self.blob_r  # radius of the blob
         self.maxpool = MaxPool3d(kernel_size=2 * self.r + 1, stride=1, padding=self.r)  # removed on 22/04/2026

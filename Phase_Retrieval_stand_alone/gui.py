@@ -19,6 +19,18 @@ from func_utils import characterize_PSF
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_SAVE_PATH = str(PROJECT_DIR / "config" / "config.json")
+MICROSCOPES_PATH = str(PROJECT_DIR / "config" / "microscopes.json")
+
+MICROSCOPE_FIELDS = ["M", "NA", "n_immersion", "f_4f", "ps_camera", "ps_BFP", "n_sample", "bitdepth"]
+
+CRITICAL_CSS = """
+.critical-config {
+    border: 2px solid #d9534f;
+    border-radius: 10px;
+    padding: 14px;
+    background: rgba(217, 83, 79, 0.06);
+}
+"""
 
 
 def _default_config() -> Config:
@@ -34,6 +46,20 @@ def _default_config() -> Config:
             external_mask=None,
         )
     )
+
+
+def _load_microscopes() -> dict:
+    """Read the named-microscope-preset library, tolerating a missing/corrupt file."""
+    try:
+        with open(MICROSCOPES_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_microscopes(microscopes: dict):
+    with open(MICROSCOPES_PATH, "w") as f:
+        json.dump(microscopes, f, indent=2)
 
 
 class _StreamToQueue(io.TextIOBase):
@@ -114,9 +140,10 @@ def config_to_fields(cfg: Config) -> list:
     """Flatten a Config into the ordered list of Gradio field values (44 items)."""
     u, a = cfg.user, cfg.advanced
     return [
-        # ── UserConfig (18) ──────────────────────────────────────────────────
+        # ── Microscope preset fields, part 1 (7 of 8 — bitdepth is with AdvancedConfig below) ──
         u.M, u.NA, u.n_immersion, u.lamda, u.n_sample,
         u.f_4f, u.ps_camera, u.ps_BFP,
+        # ── UserConfig geometry / data (10) ─────────────────────────────────
         u.NFP, u.nfp_text, u.zrange,
         u.project_dir, u.zstack_folder,
         u.zstack_file,
@@ -131,12 +158,12 @@ def config_to_fields(cfg: Config) -> list:
         a.fine_defocus_range_um, a.fine_defocus_step_um, a.max_shift_px,
         a.g_sigma, a.g_size, a.circ_scale,
         a.d_min_um, a.d_max_um,
+        "" if a.d_init_um is None else str(a.d_init_um),
         a.bitdepth,
         "" if a.baseline is None else str(a.baseline),
         "" if a.read_std is None else str(a.read_std),
         "" if a.bg is None else str(a.bg),
         a.non_uniform_noise_flag,
-        a.device,
         a.mask_fit_save_dir or "",
         a.debug_bfp,
         a.debug_every,
@@ -145,9 +172,10 @@ def config_to_fields(cfg: Config) -> list:
 
 
 def fields_to_config(
-    # UserConfig (18)
+    # Microscope preset fields, part 1 (7 of 8)
     M, NA, n_immersion, lamda, n_sample,
     f_4f, ps_camera, ps_BFP,
+    # UserConfig geometry / data (10)
     NFP, nfp_text, zrange,
     project_dir, zstack_folder,
     zstack_file,
@@ -159,11 +187,11 @@ def fields_to_config(
     lr_phase_mult, lr_sigma_mult, lr_d_mult,
     fine_defocus_range_um, fine_defocus_step_um, max_shift_px,
     g_sigma, g_size, circ_scale,
-    d_min_um, d_max_um,
+    d_min_um, d_max_um, d_init_um,
     bitdepth,
     baseline, read_std, bg,
     non_uniform_noise_flag,
-    device, mask_fit_save_dir,
+    mask_fit_save_dir,
     debug_bfp, debug_every, debug_max_emitters,
 ) -> Config:
     """Parse ordered Gradio field values back into a Config object."""
@@ -203,12 +231,12 @@ def fields_to_config(
             circ_scale=float(circ_scale),
             d_min_um=float(d_min_um),
             d_max_um=float(d_max_um),
+            d_init_um=_opt_float(d_init_um),
             bitdepth=int(float(bitdepth)),
             baseline=_opt_float(baseline),
             read_std=_opt_float(read_std),
             bg=_opt_float(bg),
             non_uniform_noise_flag=bool(non_uniform_noise_flag),
-            device=str(device).strip(),
             mask_fit_save_dir=_opt_str(mask_fit_save_dir),
             debug_bfp=bool(debug_bfp),
             debug_every=int(float(debug_every)),
@@ -228,7 +256,16 @@ def build_demo() -> gr.Blocks:
             pass
 
     with gr.Blocks(title="DeepSTORM3D") as demo:
+        gr.HTML(f"<style>{CRITICAL_CSS}</style>")
         gr.Markdown("# DeepSTORM3D — PSF Characterization")
+
+        # ── Run (top: buttons, live debug panel, log) ───────────────────────
+        with gr.Row():
+            run_btn = gr.Button("Run Characterize PSF", variant="primary")
+            stop_btn = gr.Button("Stop", variant="stop", interactive=False)
+        gr.Markdown("**Latest debug snapshot (live)**")
+        live_plot = gr.Plot(show_label=False)
+        log_out = gr.Textbox(label="Output Log", lines=20, interactive=False)
 
         # ── Load / Save ──────────────────────────────────────────────────────
         with gr.Row():
@@ -244,29 +281,17 @@ def build_demo() -> gr.Blocks:
                     placeholder="Save status appears here",
                 )
 
-        # ── User Config ──────────────────────────────────────────────────────
-        with gr.Group():
-            gr.Markdown("### User Config")
-
-            gr.Markdown("**Microscope optics**")
-            with gr.Row():
-                u_M        = gr.Number(label="Magnification (M)",      value=defaults[0])
-                u_NA       = gr.Number(label="NA",                      value=defaults[1])
-                u_n_imm    = gr.Number(label="n_immersion",             value=defaults[2])
-                u_lamda    = gr.Number(label="λ emission (µm)",         value=defaults[3])
-            with gr.Row():
-                u_n_sample = gr.Number(label="n_sample",                value=defaults[4])
-                u_f4f      = gr.Number(label="f_4f (µm)",               value=defaults[5])
-                u_ps_cam   = gr.Number(label="Camera pixel size (µm)",  value=defaults[6])
-                u_ps_BFP   = gr.Number(label="BFP pixel size (µm)",    value=defaults[7])
-
-            gr.Markdown("**Experiment geometry**")
+        # ── Critical config ──────────────────────────────────────────────────
+        with gr.Group(elem_classes=["critical-config"]):
+            gr.Markdown("## ⚠️ Critical — configure before running")
+            gr.Markdown(
+                "These change per experiment and have no safe generic default — "
+                "double-check them before every run."
+            )
             with gr.Row():
                 u_NFP      = gr.Number(label="NFP (µm)",                value=defaults[8])
                 u_nfp_text = gr.Textbox(label='nfp_text ("start, end, count")', value=defaults[9])
-                u_zrange   = gr.Textbox(label='zrange ("min, max" µm)', value=defaults[10])
-
-            gr.Markdown("**Data paths**")
+                u_lamda    = gr.Number(label="λ emission (µm)",         value=defaults[3])
             with gr.Row():
                 u_project_dir   = gr.Textbox(label="Project root dir", value=defaults[11])
                 u_zstack_folder = gr.Textbox(label="Z-stack folder (relative to project root)", value=defaults[12])
@@ -282,7 +307,38 @@ def build_demo() -> gr.Blocks:
                 label="Off-axis pixel coords [[row, col], ...] (JSON)",
                 value=defaults[16], lines=3,
             )
-            u_ext_mask    = gr.Textbox(
+
+        # ── Microscope setup (named presets) ────────────────────────────────
+        with gr.Group():
+            gr.Markdown("### Microscope Setup")
+            gr.Markdown("Fixed for a given physical setup — save/load as a named preset.")
+            microscopes = _load_microscopes()
+            with gr.Row():
+                m_dropdown = gr.Dropdown(
+                    label="Microscope preset",
+                    choices=list(microscopes.keys()),
+                    value="Default" if "Default" in microscopes else None,
+                )
+            with gr.Row():
+                m_M        = gr.Number(label="Magnification (M)",      value=defaults[0])
+                m_NA       = gr.Number(label="NA",                      value=defaults[1])
+                m_n_imm    = gr.Number(label="n_immersion",             value=defaults[2])
+                m_n_sample = gr.Number(label="n_sample",                value=defaults[4])
+            with gr.Row():
+                m_f4f      = gr.Number(label="f_4f (µm)",               value=defaults[5])
+                m_ps_cam   = gr.Number(label="Camera pixel size (µm)",  value=defaults[6])
+                m_ps_BFP   = gr.Number(label="BFP pixel size (µm)",     value=defaults[7])
+                m_bitdepth = gr.Number(label="Bit depth",               value=defaults[35], precision=0)
+            with gr.Row():
+                m_name     = gr.Textbox(label="Save current values as new microscope named:")
+                m_save_btn = gr.Button("Save as Microscope")
+            m_status = gr.Textbox(show_label=False, interactive=False, placeholder="Microscope save status appears here")
+
+        # ── Other settings ───────────────────────────────────────────────────
+        with gr.Group():
+            gr.Markdown("### Other settings")
+            u_zrange   = gr.Textbox(label='zrange ("min, max" µm, display only)', value=defaults[10])
+            u_ext_mask = gr.Textbox(
                 label="Starting-guess mask for phase retrieval (.npy/.mat path, optional)",
                 value=defaults[17],
             )
@@ -315,36 +371,26 @@ def build_demo() -> gr.Blocks:
             with gr.Row():
                 a_d_min    = gr.Number(label="d_min (µm)",             value=defaults[32])
                 a_d_max    = gr.Number(label="d_max (µm)",             value=defaults[33])
+                a_d_init   = gr.Textbox(label="d_init (µm, empty=midpoint of [d_min, d_max])", value=defaults[34])
 
             gr.Markdown("**Camera / noise**")
             with gr.Row():
-                a_bitdepth = gr.Number(label="Bit depth",              value=defaults[34], precision=0)
-                a_baseline = gr.Textbox(label="Baseline (empty=None)", value=defaults[35])
-                a_read_std = gr.Textbox(label="Read std (empty=None)", value=defaults[36])
-                a_bg       = gr.Textbox(label="BG (empty=None)",       value=defaults[37])
-            a_noisy        = gr.Checkbox(label="Non-uniform noise",    value=defaults[38])
+                a_baseline = gr.Textbox(label="Baseline (empty=None)", value=defaults[36])
+                a_read_std = gr.Textbox(label="Read std (empty=None)", value=defaults[37])
+                a_bg       = gr.Textbox(label="BG (empty=None)",       value=defaults[38])
+            a_noisy        = gr.Checkbox(label="Non-uniform noise",    value=defaults[39])
 
             gr.Markdown("**Runtime / debug**")
-            with gr.Row():
-                a_device   = gr.Textbox(label="Device",                          value=defaults[39])
-                a_save_dir = gr.Textbox(label="mask_fit_save_dir (empty=auto)",  value=defaults[40])
+            a_save_dir = gr.Textbox(label="mask_fit_save_dir (empty=auto)",  value=defaults[40])
             with gr.Row():
                 a_dbg_bfp  = gr.Checkbox(label="Debug BFP",                     value=defaults[41])
-                a_dbg_ev   = gr.Number(label="Debug every N epochs",             value=defaults[42], precision=0)
+                a_dbg_ev   = gr.Number(label="Debug every N calls",             value=defaults[42], precision=0)
                 a_dbg_max  = gr.Textbox(label="debug_max_emitters (empty=auto)", value=defaults[43])
-
-        # ── Run ──────────────────────────────────────────────────────────────
-        with gr.Row():
-            run_btn = gr.Button("Run Characterize PSF", variant="primary")
-            stop_btn = gr.Button("Stop", variant="stop", interactive=False)
-        gr.Markdown("**Latest debug snapshot (live)**")
-        live_plot = gr.Plot(show_label=False)
-        log_out = gr.Textbox(label="Output Log", lines=20, interactive=False)
 
         # component list — order MUST match config_to_fields / fields_to_config
         all_fields = [
-            u_M, u_NA, u_n_imm, u_lamda, u_n_sample,
-            u_f4f, u_ps_cam, u_ps_BFP,
+            m_M, m_NA, m_n_imm, u_lamda, m_n_sample,
+            m_f4f, m_ps_cam, m_ps_BFP,
             u_NFP, u_nfp_text, u_zrange,
             u_project_dir, u_zstack_folder,
             u_zstack, u_central, u_offax_files, u_offax_coord, u_ext_mask,
@@ -352,11 +398,14 @@ def build_demo() -> gr.Blocks:
             a_betas, a_lr_phase, a_lr_sigma, a_lr_d,
             a_fd_range, a_fd_step, a_max_sh,
             a_g_sigma, a_g_size, a_circ,
-            a_d_min, a_d_max,
-            a_bitdepth, a_baseline, a_read_std, a_bg,
-            a_noisy, a_device, a_save_dir,
+            a_d_min, a_d_max, a_d_init,
+            m_bitdepth, a_baseline, a_read_std, a_bg,
+            a_noisy, a_save_dir,
             a_dbg_bfp, a_dbg_ev, a_dbg_max,
         ]
+
+        # microscope preset fields, in the fixed order used by microscopes.json entries
+        microscope_fields = [m_M, m_NA, m_n_imm, m_f4f, m_ps_cam, m_ps_BFP, m_n_sample, m_bitdepth]
 
         # runtime-only state shared between run_handler and stop_handler — not part of Config,
         # never persisted. "busy" is an explicit one-run-at-a-time guard, kept even though
@@ -378,6 +427,26 @@ def build_demo() -> gr.Blocks:
                 return f"Saved to {DEFAULT_SAVE_PATH}"
             except Exception as exc:
                 return f"[ERROR] {exc}"
+
+        def microscope_load_handler(name):
+            data = _load_microscopes()
+            preset = data.get(name)
+            if preset is None:
+                return [gr.update()] * len(MICROSCOPE_FIELDS)
+            return [preset.get(k, gr.update()) for k in MICROSCOPE_FIELDS]
+
+        def microscope_save_handler(name, M, NA, n_immersion, f_4f, ps_camera, ps_BFP, n_sample, bitdepth):
+            name = str(name).strip()
+            if not name:
+                return gr.update(), "[ERROR] Enter a microscope name first."
+            data = _load_microscopes()
+            data[name] = {
+                "M": float(M), "NA": float(NA), "n_immersion": float(n_immersion),
+                "f_4f": float(f_4f), "ps_camera": float(ps_camera), "ps_BFP": float(ps_BFP),
+                "n_sample": float(n_sample), "bitdepth": int(float(bitdepth)),
+            }
+            _save_microscopes(data)
+            return gr.update(choices=list(data.keys()), value=name), f"Saved microscope '{name}'."
 
         def stop_handler():
             if _run_state["stop_event"] is not None:
@@ -460,6 +529,8 @@ def build_demo() -> gr.Blocks:
 
         load_file.change(fn=load_handler, inputs=load_file, outputs=all_fields)
         save_btn.click(fn=save_handler, inputs=all_fields, outputs=save_status)
+        m_dropdown.change(fn=microscope_load_handler, inputs=m_dropdown, outputs=microscope_fields)
+        m_save_btn.click(fn=microscope_save_handler, inputs=[m_name] + microscope_fields, outputs=[m_dropdown, m_status])
         run_btn.click(fn=run_handler, inputs=all_fields, outputs=[log_out, live_plot, run_btn, stop_btn])
         stop_btn.click(fn=stop_handler, outputs=stop_btn)
 

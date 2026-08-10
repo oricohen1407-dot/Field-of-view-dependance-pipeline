@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 import numpy as np
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import Optional, List
 
@@ -88,7 +88,6 @@ class AdvancedConfig:
     non_uniform_noise_flag: bool = True
 
     # --- Runtime / debug ---
-    device: str = "cuda:3"
     mask_fit_save_dir: Optional[str] = None  # None -> PROJECT_DIR/mask_fit_outputs
     debug_bfp: bool = True
     debug_every: int = 250
@@ -127,7 +126,6 @@ class Config:
             'baseline': a.baseline, 'read_std': a.read_std, 'bg': a.bg,
             'non_uniform_noise_flag': a.non_uniform_noise_flag,
             # runtime
-            'device': a.device,
             'mask_fit_save_dir': a.mask_fit_save_dir,
             'debug_bfp': a.debug_bfp,
             'debug_every': a.debug_every,
@@ -167,9 +165,13 @@ class Config:
 
     @classmethod
     def from_dict(cls, d: dict) -> Config:
+        user_fields = {f.name for f in dataclass_fields(UserConfig) if f.init}
+        adv_fields = {f.name for f in dataclass_fields(AdvancedConfig) if f.init}
+        user_kwargs = {k: v for k, v in d['user'].items() if k in user_fields}
+        adv_kwargs = {k: v for k, v in d['advanced'].items() if k in adv_fields}
         return cls(
-            user=UserConfig(**d['user']),
-            advanced=AdvancedConfig(**d['advanced']),
+            user=UserConfig(**user_kwargs),
+            advanced=AdvancedConfig(**adv_kwargs),
         )
 
     def save(self, path: str):

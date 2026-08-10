@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import scipy.io as sio
 from image_model import simulation_grid_size
+from DS3Dplus.ds3d_utils import select_device
 
 PROJECT_DIR = Path(__file__).resolve().parent
 
@@ -51,7 +52,7 @@ def characterize_PSF(cfg: Config, live_box=None, stop_event=None):
     if stop_event is not None:
         param_dict['stop_event'] = stop_event
 
-    device = torch.device(param_dict['device'] if torch.cuda.is_available() else 'cpu')
+    device = select_device()
     param_dict['device'] = device
     print(f'device used (characterize_PSF): {device}')
 
