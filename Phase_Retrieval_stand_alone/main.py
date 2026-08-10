@@ -35,7 +35,7 @@ cfg = Config(
         central_bead_coordinates_pixel=CENTRAL_BEAD_COORDINATES_PIXEL,
         offaxis_zstack_files=OFFAXIS_ZSTACK_FILES,
         offaxis_coords_pixel=OFFAXIS_COORDS_PIXEL,
-        external_mask=None,           # or absolute path to a .npy mask
+        external_mask=None,           # optional starting-guess mask (.npy/.mat) for phase retrieval
     )
 )
 # =============================================================================

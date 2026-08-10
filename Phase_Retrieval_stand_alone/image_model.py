@@ -6,6 +6,12 @@ import math
 import torch.nn.functional as F
 from DS3Dplus.ds3d_utils import asm_propagate
 
+
+def simulation_grid_size(f_4f, lamda, ps_camera, ps_BFP) -> int:
+    N = np.floor(f_4f * lamda / (ps_camera * ps_BFP))
+    return int(N + 1 - (N % 2))
+
+
 class ImModel_pr(torch.nn.Module):
     def __init__(self, params):
         """
@@ -44,8 +50,7 @@ class ImModel_pr(torch.nn.Module):
         g_sigma = params['g_sigma']  # std of the gaussian blur kernel
         ###################
 
-        N = np.floor(self.f_4f * self.lamda / (self.ps_camera * self.ps_BFP))  # simulation size
-        N = int(N + 1 - (N % 2))  # make it odd
+        N = simulation_grid_size(self.f_4f, self.lamda, self.ps_camera, self.ps_BFP)
         print(f'Simulation size of the imaging model is {N} which must be larger than image size (PSF z-stack and training images)!')
 
         # pupil/aperture at back focal plane
@@ -128,8 +133,11 @@ class ImModel_pr(torch.nn.Module):
         self.debug_dir = str(params.get("debug_dir", os.path.join("debug", "bfp")))
         self.debug_max_emitters = int(params.get("debug_max_emitters", 5 ))  # save first K in batch  number of beads
         self._debug_call_idx = 0
-        #self.phase_mask = torch.tensor(circ, device=device, requires_grad=True)
-        self.phase_mask = torch.zeros((N, N), device=self.device, requires_grad=True)
+        phase_mask_init = params.get('phase_mask_init')
+        if phase_mask_init is not None:
+            self.phase_mask = torch.tensor(phase_mask_init, device=self.device, dtype=torch.float32, requires_grad=True)
+        else:
+            self.phase_mask = torch.zeros((N, N), device=self.device, requires_grad=True)
 
         self.g_sigma = torch.tensor(g_sigma, device=self.device, requires_grad=True)
 
