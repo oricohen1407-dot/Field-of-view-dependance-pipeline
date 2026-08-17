@@ -12,6 +12,13 @@ def simulation_grid_size(f_4f, lamda, ps_camera, ps_BFP) -> int:
     return int(N + 1 - (N % 2))
 
 
+def _logit_init(x_init, lo, hi, eps=1e-3):
+    """Map an initial value into an unconstrained logit parameter, bounded to [lo, hi]."""
+    p = (x_init - lo) / (hi - lo + 1e-12)
+    p = min(max(p, eps), 1.0 - eps)
+    return math.log(p / (1.0 - p))
+
+
 class ImModel_pr(torch.nn.Module):
     def __init__(self, params):
         """
@@ -34,8 +41,6 @@ class ImModel_pr(torch.nn.Module):
         d_init = params["mask_offset_in_um"]
 
         self.centralBeadCoordinates_pixel = list(params['centralBeadCoordinates_pixel'])
-        self.NFP = params['NFP']  # location of the nominal focal plane
-
 
         # map initial d into an unconstrained parameter via inverse-sigmoid (logit)
         eps = 1e-3
@@ -44,6 +49,20 @@ class ImModel_pr(torch.nn.Module):
         d_raw_init = math.log(p / (1.0 - p))
 
         self.d_raw = torch.nn.Parameter(torch.tensor(d_raw_init, device=self.device, dtype=torch.float32))
+
+        # ---- learnable NFP center offset (range length is fixed, not fitted) ----
+        self.nfp_range_um = float(params["nfp_range_um"])
+        if self.nfp_range_um <= 0:
+            raise ValueError(f"nfp_range_um must be positive; got {self.nfp_range_um}")
+        self.nfp_offset_min_um = params["nfp_offset_min_um"]
+        self.nfp_offset_max_um = params["nfp_offset_max_um"]
+        self.Z = int(params["Z"])
+        if self.Z < 2:
+            raise ValueError(f"ImModel_pr requires Z >= 2 to fit an NFP sweep; got Z={self.Z}")
+
+        nfp_offset_init = params["nfp_offset_init_um"]
+        nfp_offset_raw_init = _logit_init(nfp_offset_init, self.nfp_offset_min_um, self.nfp_offset_max_um)
+        self.nfp_offset_raw = torch.nn.Parameter(torch.tensor(nfp_offset_raw_init, device=self.device, dtype=torch.float32))
         # image
         H, W = params['H'], params['W']  # FOV size
         g_size = 9  # size of the gaussian blur kernel
@@ -146,6 +165,21 @@ class ImModel_pr(torch.nn.Module):
     def d_um(self):
         # bounded to [d_min_um, d_max_um]
         return self.d_min_um + (self.d_max_um - self.d_min_um) * torch.sigmoid(self.d_raw)
+
+    def nfp_offset_um(self):
+        return self.nfp_offset_min_um + (self.nfp_offset_max_um - self.nfp_offset_min_um) * torch.sigmoid(self.nfp_offset_raw)
+
+    def nfps(self, zi=None):
+        """Per-slice NFP sweep, fixed-length window centered on nfp_offset_um().
+        zi: slice indices in [0, Z-1]; default arange(Z)."""
+        center = self.nfp_offset_um()
+        start = center - self.nfp_range_um / 2
+        step = self.nfp_range_um / (self.Z - 1)
+        if zi is None:
+            zi = torch.arange(self.Z, device=self.device, dtype=start.dtype)
+        else:
+            zi = zi.to(dtype=start.dtype)
+        return start + step * zi
 
     def _maybe_save_debug(self, ef_bfp_eff, psfs, xyzps, NFPs, targets=None):
         if not self.debug_bfp:

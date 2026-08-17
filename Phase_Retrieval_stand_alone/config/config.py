@@ -1,6 +1,5 @@
 from __future__ import annotations
 import json
-import numpy as np
 from dataclasses import dataclass, field, asdict, fields as dataclass_fields
 from pathlib import Path
 from typing import Optional, List
@@ -19,9 +18,7 @@ class UserConfig:
     ps_BFP: float = 80        # BFP pixel size (um)
 
     # --- Experiment geometry ---
-    NFP: float = -3.9         # nominal focal plane (um)
-    nfp_text: str = "-7.5, -3.5, 21"  # "start, end, count" (um)
-    # TODO RK: take count (21) from bead stacks (num images in z)
+    nfp_range_um: float = 4.0  # CRITICAL: fixed length of the experiment's z-range (um), not fitted
     zrange: str = "0.0, 3.2"  # display z-range (um)
 
     # --- Data (no defaults — must be set explicitly per experiment) ---
@@ -32,16 +29,6 @@ class UserConfig:
     offaxis_zstack_files: List[str] = field(default_factory=list)  # filenames only
     offaxis_coords_pixel: List[List[int]] = field(default_factory=list)
     external_mask: Optional[str] = None  # starting-guess mask (.npy/.mat) for phase retrieval, or None for zero-init
-
-    # --- Derived: computed from nfp_text in __post_init__, excluded from serialization ---
-    nfps: np.ndarray = field(init=False, repr=False)
-
-    def __post_init__(self):
-        self.nfps = self._parse_nfps()
-
-    def _parse_nfps(self) -> np.ndarray:
-        start, stop, n = [x.strip() for x in self.nfp_text.split(',')]
-        return np.linspace(float(start), float(stop), int(n))
 
     def _resolve_data_path(self, filename: str) -> str:
         return str(Path(self.project_dir) / self.zstack_folder / filename)
@@ -65,7 +52,9 @@ class AdvancedConfig:
     adam_betas: tuple = (0.9, 0.99)   # Adam (beta1, beta2)
     lr_phase_mult: float = 100000     # phase mask LR = lr_phase_mult * learning_rate
     lr_sigma_mult: float = 1          # g_sigma LR multiplier; matches root pipeline default (lr_sigma = learning_rate)
-    lr_d_mult: float = 1000           # mask displacement LR = lr_d_mult * learning_rate; matches root pipeline default
+    lr_d_mult: float = 5000           # mask displacement LR = lr_d_mult * learning_rate; matches root pipeline default
+    lr_nfp_mult: float = 100           # NFP center-offset LR = lr_nfp_mult * learning_rate; kept low — offset's bounds span only ~20um vs d's ~15000um, so it saturates against the wall fast at d-like multipliers
+    mask_warmup_epochs: int = 50      # initial epochs fitting phase_mask+g_sigma from the on-axis bead only, d/NFP frozen; d's gradient depends on the mask having real structure, so this gives it a head start before off-axis beads (and NFP) join in
 
     # --- Per-bead fine alignment ---
     fine_defocus_range_um: float = 0.2
@@ -73,12 +62,15 @@ class AdvancedConfig:
     max_shift_px: int = 10
 
     # --- Forward model internals ---
-    g_sigma: float = 1.2         # initial Gaussian blur sigma (um); tuned 17/12/2025
+    g_sigma: float = 1.0         # initial Gaussian blur sigma (um); tuned 17/12/2025
     g_size: int = 9              # blur kernel size (pixels)
     circ_scale: float = 5.3/5.8  # aperture scaling; tuned 26/01/2026
     d_min_um: float = 15000      # mask displacement lower bound (um)
     d_max_um: float = 30000      # mask displacement upper bound (um)
     d_init_um: Optional[float] = None   # initial guess for d; None = midpoint of [d_min_um, d_max_um]
+    nfp_offset_init_um: Optional[float] = None  # initial guess for the NFP offset; None = midpoint of bounds. Not critical
+    nfp_offset_min_um: float = -10      # lower bound for the learned NFP offset (um), sanity limit
+    nfp_offset_max_um: float = 10       # upper bound for the learned NFP offset (um), sanity limit
 
     # --- Camera / noise ---
     bitdepth: int = 16
@@ -90,7 +82,7 @@ class AdvancedConfig:
     # --- Runtime / debug ---
     mask_fit_save_dir: Optional[str] = None  # None -> PROJECT_DIR/mask_fit_outputs
     debug_bfp: bool = True
-    debug_every: int = 250
+    debug_every: int = 100
     debug_max_emitters: Optional[int] = None  # None -> len(offaxis_coords_pixel) + 1
 
 
@@ -110,7 +102,9 @@ class Config:
             'M': u.M, 'NA': u.NA, 'lamda': u.lamda,
             'n_immersion': u.n_immersion, 'n_sample': u.n_sample,
             'f_4f': u.f_4f, 'ps_camera': u.ps_camera, 'ps_BFP': u.ps_BFP,
-            'NFP': u.NFP, 'nfps': u.nfps,
+            'nfp_range_um': u.nfp_range_um,
+            'nfp_offset_init_um': a.nfp_offset_init_um,
+            'nfp_offset_min_um': a.nfp_offset_min_um, 'nfp_offset_max_um': a.nfp_offset_max_um,
             # bead geometry
             'centralBeadCoordinates_pixel': u.central_bead_coordinates_pixel,
             'offaxis_zstack_files': u.offaxis_zstack_file_paths,
@@ -141,7 +135,6 @@ class Config:
         u, a = self.user, self.advanced
         return {
             'zstack_file_path': u.zstack_file_path,
-            'nfps': u.nfps,
             'r_bead': a.r_bead,
             'epochs': a.epochs,
             'loss_label': a.loss_label,
@@ -153,15 +146,15 @@ class Config:
             'lr_phase_mult': a.lr_phase_mult,
             'lr_sigma_mult': a.lr_sigma_mult,
             'lr_d_mult': a.lr_d_mult,
+            'lr_nfp_mult': a.lr_nfp_mult,
+            'mask_warmup_epochs': a.mask_warmup_epochs,
         }
 
     # --- Serialization ---
 
     def to_dict(self) -> dict:
-        """Convert to a JSON-serializable dict. nfps is excluded (derived from nfp_text)."""
-        d = asdict(self)
-        d['user'].pop('nfps', None)
-        return d
+        """Convert to a JSON-serializable dict."""
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> Config:

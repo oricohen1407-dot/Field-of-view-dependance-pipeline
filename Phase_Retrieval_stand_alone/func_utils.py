@@ -71,13 +71,13 @@ def characterize_PSF(cfg: Config, live_box=None, stop_event=None):
     param_dict['g_sigma'] = (np.round(0.8*g_sigma, decimals=2), np.round(1.0*g_sigma, decimals=2))
     param_dict['phase_mask'] = phase_mask
 
+    # DS3Dplus/ds3d_utils.py's ImModel/ImModelBase still require a single scalar 'NFP' key
+    param_dict['NFP'] = param_dict['nfp_offset_um']
+
     show_z_psf(param_dict)
 
     save_dir = param_dict.get('mask_fit_save_dir') or str(PROJECT_DIR / 'mask_fit_outputs')
-    NFP_exp = param_dict['NFP']
-    param_dict['NFP'] = 0.0
     fit_mask_offset_from_offaxis_stacks(param_dict, save_dir=save_dir)
-    param_dict['NFP'] = NFP_exp
 
     return ("PSF characterization is done. Check "
             "\nphase_retrieval_results.jpg "

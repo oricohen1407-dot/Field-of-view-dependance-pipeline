@@ -3,6 +3,7 @@ import csv
 import math
 import torch
 import numpy as np
+import tifffile
 from skimage import io
 from scipy import ndimage
 from datetime import datetime
@@ -10,6 +11,22 @@ import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from image_model import ImModel_pr
 from DS3Dplus.ds3d_utils import ImModel
+
+def _load_zstack_with_count(path: str):
+    """Z (slice count) is authoritative from the file itself — these TIFFs carry no
+    z-spacing/calibration metadata. Cross-checks ImageJ's 'slices' tag if present (warn only)."""
+    zst = io.imread(path).astype(np.float32)
+    if zst.ndim != 3:
+        raise ValueError(f"{path}: expected a 3D (Z,H,W) z-stack TIFF, got shape {zst.shape}")
+    Z = int(zst.shape[0])
+    try:
+        with tifffile.TiffFile(path) as tf:
+            slices_tag = (tf.imagej_metadata or {}).get('slices')
+        if slices_tag is not None and int(slices_tag) != Z:
+            print(f"[PR] WARNING: {path}: ImageJ 'slices' tag={slices_tag} but frame count={Z}; using {Z}.")
+    except Exception as exc:
+        print(f"[PR] NOTE: could not read ImageJ metadata from {path} ({exc}); using frame count {Z}.")
+    return zst, Z
 
 def _norm01_sum(im):
     im = im.astype(np.float32, copy=False)
@@ -73,16 +90,13 @@ def calculate_cc(output, target):
 def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     device = param_dict['device']
 
-    nfps = np.asarray(param_dict['nfps'], dtype=np.float32)
-    Z = len(nfps)
-
     # ----------------------------
     # Collect stacks: on-axis + off-axis
     # ----------------------------
     stacks = []
 
     # RK: on-axis stack (x=y=0)
-    zstack_on = io.imread(pr_dict['zstack_file_path']).astype(np.float32)
+    zstack_on, Z = _load_zstack_with_count(pr_dict['zstack_file_path'])
     stacks.append(("onaxis", zstack_on, 0.0, 0.0))
 
     # off-axis stacks (if provided)
@@ -107,7 +121,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     # ----------------------------
     y_list = []
     xyz_list = []
-    nfp_list = []
+    zi_list = []
     bead_id_list = []
     stack_index = 0
 
@@ -118,7 +132,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         bead_id = stack_index - 1  # added on 15/03/2026
         if zst.shape[0] != Z:
             raise ValueError(
-                f"{name}: Z mismatch. stack has {zst.shape[0]} but nfps has {Z}"
+                f"{name}: Z mismatch. stack has {zst.shape[0]} but on-axis calibration stack has {Z}"
             )
 
         # ---------- ORIGINAL PR BACKGROUND CLEANUP ----------
@@ -182,7 +196,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             y_list.append(zst[zi] / norm_factor)  # normalize according to center
             #xyz_list.append([x_um, y_um, 0.0, float(z_photons[zi])])  # <-- photons restored
             xyz_list.append([x_um, y_um, 0.0, 1.0])
-            nfp_list.append(float(nfps[zi]))
+            zi_list.append(zi)
             bead_id_list.append(bead_id)
             is_onaxis_list.append(name == "onaxis")  # <-- add
 
@@ -192,9 +206,8 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     y_true = torch.from_numpy(np.stack(y_list, 0)).to(device)  # [B,H,W]
     xyzps = torch.from_numpy(np.asarray(xyz_list, np.float32)).to(device)  # [B,4]
 
-    # NFP per sample (constant)
-    #NFPs = torch.full((xyzps.shape[0],), float(param_dict['NFP']), device=device)  # removed on 26/01/2026
-    NFPs = torch.tensor(np.asarray(nfp_list, np.float32), device=device)
+    # per-sample slice index; NFPs itself is recomputed from im_model.nfps(zi_tensor) each epoch
+    zi_tensor = torch.tensor(np.asarray(zi_list, np.int64), device=device)
     bead_ids = torch.tensor(np.asarray(bead_id_list, np.int64), device=device)  # added on 15/03/2026
     is_onaxis = torch.tensor(is_onaxis_list, device=device)  # [B] bool
 
@@ -228,6 +241,30 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     params_pr['mask_offset_in_um'] = d_init_um
     # end ori's edit from 26/01/2026 for improved pr with displacement
 
+    # initial NFP offset: explicit Config override > warm start from a prior run > bounds midpoint
+    nfp_range_um = param_dict['nfp_range_um']
+    nfp_offset_min_um = param_dict['nfp_offset_min_um']
+    nfp_offset_max_um = param_dict['nfp_offset_max_um']
+
+    nfp_offset_init = param_dict['nfp_offset_init_um']
+    if nfp_offset_init is None:
+        nfp_offset_init = param_dict.get('nfp_offset_um')  # warm start, e.g. resuming a prior fit
+    if nfp_offset_init is None:
+        nfp_offset_init = 0.5 * (nfp_offset_min_um + nfp_offset_max_um)
+    nfp_offset_init = float(nfp_offset_init)
+
+    if not (nfp_offset_min_um <= nfp_offset_init <= nfp_offset_max_um):
+        raise ValueError(
+            f"nfp_offset_init_um={nfp_offset_init} must be inside "
+            f"[{nfp_offset_min_um}, {nfp_offset_max_um}]."
+        )
+
+    params_pr['nfp_range_um'] = nfp_range_um
+    params_pr['nfp_offset_min_um'] = nfp_offset_min_um
+    params_pr['nfp_offset_max_um'] = nfp_offset_max_um
+    params_pr['nfp_offset_init_um'] = nfp_offset_init
+    params_pr['Z'] = Z
+
     im_model = ImModel_pr(params_pr).to(device)
 
     im_model.train()
@@ -237,6 +274,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             {'params': [im_model.phase_mask], 'lr': pr_dict['lr_phase_mult'] * pr_dict['learning_rate']},
             {'params': [im_model.g_sigma],    'lr': pr_dict['lr_sigma_mult'] * pr_dict['learning_rate']},
             {'params': [im_model.d_raw],      'lr': pr_dict['lr_d_mult']     * pr_dict['learning_rate']},
+            {'params': [im_model.nfp_offset_raw], 'lr': pr_dict['lr_nfp_mult'] * pr_dict['learning_rate']},
         ],
         betas=tuple(pr_dict['adam_betas'])
     )
@@ -255,11 +293,46 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     )
     # end
     stop_event = param_dict.get('stop_event')
+
+    # --- Phase A: mask/g_sigma warmup from the on-axis bead alone, d/NFP frozen ---
+    # d's gradient depends on the mask having real structure (see phase_retrieval physics
+    # notes); this gives the mask (fast LR) a head start before off-axis beads and NFP join in.
+    mask_warmup_epochs = int(pr_dict['mask_warmup_epochs'])
+    if mask_warmup_epochs > 0:
+        onaxis_idx = torch.where(is_onaxis)[0]
+        xyzps_onaxis = xyzps[onaxis_idx]
+        y_onaxis = y_true[onaxis_idx]
+        zi_onaxis = zi_tensor[onaxis_idx]
+
+        im_model.d_raw.requires_grad_(False)
+        im_model.nfp_offset_raw.requires_grad_(False)
+
+        for warmup_epoch in range(mask_warmup_epochs):
+            if stop_event is not None and stop_event.is_set():
+                print(f"[PR][warmup] stop requested — halting at epoch {warmup_epoch}")
+                break
+            opt.zero_grad()
+            pred = im_model(xyzps_onaxis, im_model.nfps(zi_onaxis), targets=y_onaxis)
+            loss = F.mse_loss(pred, y_onaxis)
+            loss.backward()
+            opt.step()
+            with torch.no_grad():
+                im_model.g_sigma.clamp_(min=1e-3, max=20.0)
+            if (warmup_epoch % 10) == 0:
+                print(f"[PR][warmup] epoch {warmup_epoch:4d} loss={float(loss.item()):.6g} "
+                      f"g_sigma={float(im_model.g_sigma.item()):.4f}")
+
+        im_model.d_raw.requires_grad_(True)
+        im_model.nfp_offset_raw.requires_grad_(True)
+        print(f"[PR] mask warmup done ({mask_warmup_epochs} epochs, on-axis only) "
+              f"— d/NFP unfrozen for full-batch fitting")
+
     for epoch in range(pr_dict['epochs']):
         if stop_event is not None and stop_event.is_set():
             print(f"[PR] stop requested — halting at epoch {epoch}")
             break
         opt.zero_grad()
+        NFPs = im_model.nfps(zi_tensor)  # depends on the live nfp_offset_raw
         apply_off_axis_space_invariance = (max_shift_px > 0)
 
         if not apply_off_axis_space_invariance:
@@ -399,6 +472,8 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         if epoch == 0:
             print("d_um:", im_model.d_um().detach().item())
             print("grad(d_raw):", None if im_model.d_raw.grad is None else im_model.d_raw.grad.detach().item())
+            print("nfp_offset_um:", im_model.nfp_offset_um().detach().item())
+            print("grad(nfp_offset_raw):", None if im_model.nfp_offset_raw.grad is None else im_model.nfp_offset_raw.grad.detach().item())
 
         opt.step()
         Visualize_mask = True
@@ -436,14 +511,26 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
 
             if (epoch % 10) == 0:
                 d_now = float(im_model.d_um().detach().cpu().item())
+                nfp_offset_now = float(im_model.nfp_offset_um().detach().cpu().item())
                 print(
-                    f"[PR] epoch {epoch:4d} loss={float(loss.item()):.6g}  d={d_now:.2f} um  g_sigma={float(im_model.g_sigma.item()):.4f}")
+                    f"[PR] epoch {epoch:4d} loss={float(loss.item()):.6g}  d={d_now:.2f} um  "
+                    f"g_sigma={float(im_model.g_sigma.item()):.4f}  "
+                    f"nfp_offset={nfp_offset_now:.3f} um")
 
     # save final values back
     param_dict['mask_offset_in_um'] = float(im_model.d_um().detach().cpu().item())
     print(f"[PR] done. best d = {param_dict['mask_offset_in_um']:.2f} um")
     phase_mask = im_model.phase_mask.detach().cpu().numpy()
     g_sigma = float(im_model.g_sigma.detach().cpu().numpy())
+
+    with torch.no_grad():
+        NFPs = im_model.nfps(zi_tensor).detach()
+
+    param_dict['nfp_offset_um'] = float(im_model.nfp_offset_um().detach().cpu().item())
+    param_dict['nfp_range_um'] = float(im_model.nfp_range_um)
+    param_dict['nfp_fitted_Z'] = int(Z)
+    print(f"[PR] done. fitted NFP offset={param_dict['nfp_offset_um']:.3f} um "
+          f"(range={param_dict['nfp_range_um']} um, Z={Z})")
 
     #print(f"[PR] done. best d = {d:.1f} um")
 
@@ -458,6 +545,8 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     with open(os.path.join(save_dir, "g_sigma_and_d.txt"), "w") as f:
         f.write(f"g_sigma = {g_sigma}\n")
         f.write(f"mask_offset_in_um (d) = {float(param_dict['mask_offset_in_um'])}\n")
+        f.write(f"nfp_offset_um = {param_dict['nfp_offset_um']}\n")
+        f.write(f"nfp_range_um = {param_dict['nfp_range_um']}\n")
 
     # helper: float stack -> uint16 for viewing
     def _to_u16(st):
@@ -474,15 +563,11 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     with torch.no_grad():
         for name, zst, x_um, y_um in stacks:
             cnt+=1
-            # build xyz for this bead (Z samples)
-            #xyz_bead = np.stack([[x_um, y_um, float(nfps[zi]), 1.0] for zi in range(Z)], axis=0).astype(np.float32)
-            xyz_bead = np.stack([[x_um, y_um, float(nfps[zi])*0, 1.0] for zi in range(Z)], axis=0).astype(np.float32)
+            # z is always 0 — axial variation flows entirely through NFPs
+            xyz_bead = np.stack([[x_um, y_um, 0.0, 1.0] for _ in range(Z)], axis=0).astype(np.float32)
             xyz_bead_t = torch.from_numpy(xyz_bead).to(device)
-            NFPs_bead = torch.full((Z,), float(param_dict['NFP']), device=device)
-            #NFPs_bead = torch.full((Z,), float(param_dict['NFP'])*0, device=device)
 
-            #pred = im_model(xyz_bead_t, NFPs_bead).detach().cpu().numpy()  # [Z,H,W]
-            pred = im_model(xyz_bead_t, torch.tensor(nfps).to(device)).detach().cpu().numpy()  # [Z,H,W]
+            pred = im_model(xyz_bead_t, im_model.nfps()).detach().cpu().numpy()  # [Z,H,W]; NFPs is num_beads*Z long, wrong shape here
             exp = zst / (np.sum(zst, axis=(1, 2), keepdims=True) + 1e-12)   # [Z,H,W] (same norm as training)
 
             exp_u16 = _to_u16(exp)
@@ -590,33 +675,14 @@ def fit_mask_offset_from_offaxis_stacks(
     save_dir = os.path.abspath(save_dir)
     os.makedirs(save_dir, exist_ok=True)
 
-    # --- load nfps & enforce monotonic (fixes “flip”) ---
-    #nfps_raw = np.asarray(param_dict["nfps"], dtype=np.float32)
-    #Z_expected = len(nfps_raw)
+    # NFP sweep from the offset phase_retrieval() already fitted, not a raw/unfit guess
+    nfp_offset_um = param_dict["nfp_offset_um"]
+    nfp_range_um = param_dict["nfp_range_um"]
+    Z_expected = int(param_dict["nfp_fitted_Z"])
+    nfp_start_um = nfp_offset_um - nfp_range_um / 2
+    nfp_end_um = nfp_offset_um + nfp_range_um / 2
+    nfps = np.linspace(nfp_start_um, nfp_end_um, Z_expected, dtype=np.float32)
 
-    nfps = np.asarray(param_dict["nfps"], dtype=np.float32)
-
-
-
-
-    # If z values are strictly decreasing, reverse them AND reverse every exp z-stack
-    if np.all(np.diff(nfps) < 0):
-        nfps = nfps[::-1].copy()
-        reverse_exp_stacks = True
-    else:
-        reverse_exp_stacks = False
-
-    Z_expected = len(nfps)
-
-    '''
-    # If nfps is not strictly increasing, replace with a monotonic grid
-    if not np.all(np.diff(nfps_raw) > 0):
-        z0, z1 = float(nfps_raw.min()), float(nfps_raw.max())
-        nfps = np.linspace(z0, z1, Z_expected, dtype=np.float32)
-        print(f"[fit d] WARNING: nfps not monotonic -> using linspace({z0:.3f}, {z1:.3f}, {Z_expected})")
-    else:
-        nfps = nfps_raw
-    '''
     # --- model ---
     from DS3Dplus.ds3d_utils import ImModelTraining
     model = ImModelTraining(param_dict)
@@ -630,10 +696,6 @@ def fit_mask_offset_from_offaxis_stacks(
     stacks = []
     for f, (rr, cc) in zip(param_dict["offaxis_zstack_files"], param_dict["offaxis_coords_pixel"]):
         zstack = io.imread(f).astype(np.float32)  # (Z,H,W)
-        #if reverse_exp_stacks:
-            #zstack = zstack[::-1].copy()
-            #nfps = nfps[::-1].copy()
-
 
         if zstack.shape[0] != Z_expected:
             raise ValueError(f"[fit d] Z mismatch: {f} has Z={zstack.shape[0]} but nfps has {Z_expected}.")
