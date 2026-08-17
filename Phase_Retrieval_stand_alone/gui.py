@@ -311,144 +311,146 @@ def build_demo() -> gr.Blocks:
         gr.HTML(f"<style>{CRITICAL_CSS}</style>")
         gr.Markdown("# DeepSTORM3D — PSF Characterization")
 
-        # ── Run (top: buttons, live debug panel, log) ───────────────────────
-        with gr.Row():
-            run_btn = gr.Button("Run Characterize PSF", variant="primary")
-            stop_btn = gr.Button("Stop", variant="stop", interactive=False)
-        gr.Markdown("**Latest debug snapshot (live)**")
-        live_plot = gr.Plot(show_label=False)
-        log_out = gr.Textbox(label="Output Log", lines=20, interactive=False)
+        with gr.Tabs():
+            with gr.Tab("Configure"):
+                # ── Load / Save ──────────────────────────────────────────────────────
+                with gr.Row():
+                    load_file = gr.File(
+                        label="Load Config from JSON",
+                        file_types=[".json"],
+                        type="filepath",
+                    )
+                    with gr.Column():
+                        save_btn = gr.Button("Save Config to Disk")
+                        save_status = gr.Textbox(
+                            show_label=False, interactive=False,
+                            placeholder="Save status appears here",
+                        )
 
-        # ── Load / Save ──────────────────────────────────────────────────────
-        with gr.Row():
-            load_file = gr.File(
-                label="Load Config from JSON",
-                file_types=[".json"],
-                type="filepath",
-            )
-            with gr.Column():
-                save_btn = gr.Button("Save Config to Disk")
-                save_status = gr.Textbox(
-                    show_label=False, interactive=False,
-                    placeholder="Save status appears here",
-                )
+                # ── Critical config ──────────────────────────────────────────────────
+                with gr.Group(elem_classes=["critical-config"]):
+                    gr.Markdown("## ⚠️ Critical — configure before running")
+                    gr.Markdown(
+                        "These change per experiment and have no safe generic default — "
+                        "double-check them before every run."
+                    )
+                    with gr.Row():
+                        u_nfp_range = gr.Number(
+                            label="NFP z-range length (µm) — from experiment; CENTER offset is learned",
+                            value=defaults[8],
+                        )
+                        u_lamda    = gr.Number(label="λ emission (µm)",         value=defaults[3])
+                    with gr.Row():
+                        a_d_min    = gr.Number(label="d_min (µm) — mask displacement search lower bound", value=defaults[31])
+                        a_d_max    = gr.Number(label="d_max (µm) — mask displacement search upper bound", value=defaults[32])
+                    u_zstack_folder = gr.Textbox(label="Z-stack folder (relative to project root)", value=defaults[11])
+                    u_zstack      = gr.Textbox(label="Z-stack file (central bead, filename only)", value=defaults[12])
+                    u_central     = gr.Textbox(
+                        label="Central bead coords [row, col] (JSON)", value=defaults[13],
+                    )
+                    u_offax_files = gr.Textbox(
+                        label="Off-axis Z-stack files (filenames only, one per line)",
+                        value=defaults[14], lines=5,
+                    )
+                    u_offax_coord = gr.Textbox(
+                        label="Off-axis pixel coords [[row, col], ...] (JSON)",
+                        value=defaults[15], lines=3,
+                    )
 
-        # ── Critical config ──────────────────────────────────────────────────
-        with gr.Group(elem_classes=["critical-config"]):
-            gr.Markdown("## ⚠️ Critical — configure before running")
-            gr.Markdown(
-                "These change per experiment and have no safe generic default — "
-                "double-check them before every run."
-            )
-            with gr.Row():
-                u_nfp_range = gr.Number(
-                    label="NFP z-range length (µm) — from experiment; CENTER offset is learned",
-                    value=defaults[8],
-                )
-                u_lamda    = gr.Number(label="λ emission (µm)",         value=defaults[3])
-            with gr.Row():
-                a_d_min    = gr.Number(label="d_min (µm) — mask displacement search lower bound", value=defaults[31])
-                a_d_max    = gr.Number(label="d_max (µm) — mask displacement search upper bound", value=defaults[32])
-            u_zstack_folder = gr.Textbox(label="Z-stack folder (relative to project root)", value=defaults[11])
-            u_zstack      = gr.Textbox(label="Z-stack file (central bead, filename only)", value=defaults[12])
-            u_central     = gr.Textbox(
-                label="Central bead coords [row, col] (JSON)", value=defaults[13],
-            )
-            u_offax_files = gr.Textbox(
-                label="Off-axis Z-stack files (filenames only, one per line)",
-                value=defaults[14], lines=5,
-            )
-            u_offax_coord = gr.Textbox(
-                label="Off-axis pixel coords [[row, col], ...] (JSON)",
-                value=defaults[15], lines=3,
-            )
+                # ── Microscope setup (named presets) ────────────────────────────────
+                with gr.Group():
+                    gr.Markdown("### Microscope Setup")
+                    gr.Markdown("Fixed for a given physical setup — save/load as a named preset.")
+                    microscopes = _load_microscopes()
+                    with gr.Row():
+                        m_dropdown = gr.Dropdown(
+                            label="Microscope preset",
+                            choices=list(microscopes.keys()),
+                            value="Default" if "Default" in microscopes else None,
+                        )
+                    with gr.Row():
+                        m_M        = gr.Number(label="Magnification (M)",      value=defaults[0])
+                        m_NA       = gr.Number(label="NA",                      value=defaults[1])
+                        m_n_imm    = gr.Number(label="n_immersion",             value=defaults[2])
+                        m_n_sample = gr.Number(label="n_sample",                value=defaults[4])
+                    with gr.Row():
+                        m_f4f      = gr.Number(label="f_4f (µm)",               value=defaults[5])
+                        m_ps_cam   = gr.Number(label="Camera pixel size (µm)",  value=defaults[6])
+                        m_ps_BFP   = gr.Number(label="BFP pixel size (µm)",     value=defaults[7])
+                        m_bitdepth = gr.Number(label="Bit depth",               value=defaults[34], precision=0)
+                    with gr.Row():
+                        m_name     = gr.Textbox(label="Save current values as new microscope named:")
+                        m_save_btn = gr.Button("Save as Microscope")
+                    m_status = gr.Textbox(show_label=False, interactive=False, placeholder="Microscope save status appears here")
 
-        # ── Microscope setup (named presets) ────────────────────────────────
-        with gr.Group():
-            gr.Markdown("### Microscope Setup")
-            gr.Markdown("Fixed for a given physical setup — save/load as a named preset.")
-            microscopes = _load_microscopes()
-            with gr.Row():
-                m_dropdown = gr.Dropdown(
-                    label="Microscope preset",
-                    choices=list(microscopes.keys()),
-                    value="Default" if "Default" in microscopes else None,
-                )
-            with gr.Row():
-                m_M        = gr.Number(label="Magnification (M)",      value=defaults[0])
-                m_NA       = gr.Number(label="NA",                      value=defaults[1])
-                m_n_imm    = gr.Number(label="n_immersion",             value=defaults[2])
-                m_n_sample = gr.Number(label="n_sample",                value=defaults[4])
-            with gr.Row():
-                m_f4f      = gr.Number(label="f_4f (µm)",               value=defaults[5])
-                m_ps_cam   = gr.Number(label="Camera pixel size (µm)",  value=defaults[6])
-                m_ps_BFP   = gr.Number(label="BFP pixel size (µm)",     value=defaults[7])
-                m_bitdepth = gr.Number(label="Bit depth",               value=defaults[34], precision=0)
-            with gr.Row():
-                m_name     = gr.Textbox(label="Save current values as new microscope named:")
-                m_save_btn = gr.Button("Save as Microscope")
-            m_status = gr.Textbox(show_label=False, interactive=False, placeholder="Microscope save status appears here")
+                # ── Other settings ───────────────────────────────────────────────────
+                with gr.Group():
+                    gr.Markdown("### Other settings")
+                    u_zrange   = gr.Textbox(label='zrange ("min, max" µm, display only)', value=defaults[9])
+                    u_project_dir = gr.Textbox(
+                        label="Project root dir (derived — usually leave as-is)", value=defaults[10],
+                    )
+                    u_ext_mask = gr.Textbox(
+                        label="Starting-guess mask for phase retrieval (.npy/.mat path, optional)",
+                        value=defaults[16],
+                    )
 
-        # ── Other settings ───────────────────────────────────────────────────
-        with gr.Group():
-            gr.Markdown("### Other settings")
-            u_zrange   = gr.Textbox(label='zrange ("min, max" µm, display only)', value=defaults[9])
-            u_project_dir = gr.Textbox(
-                label="Project root dir (derived — usually leave as-is)", value=defaults[10],
-            )
-            u_ext_mask = gr.Textbox(
-                label="Starting-guess mask for phase retrieval (.npy/.mat path, optional)",
-                value=defaults[16],
-            )
+                # ── Advanced Config ──────────────────────────────────────────────────
+                with gr.Accordion("Advanced Config", open=False):
+                    gr.Markdown("**Phase retrieval optimisation**")
+                    with gr.Row():
+                        a_epochs   = gr.Number(label="Epochs",               value=defaults[17], precision=0)
+                        a_lr       = gr.Number(label="Learning rate",         value=defaults[18])
+                        a_loss     = gr.Number(label="Loss (1=Gauss, 2=L2)", value=defaults[19], precision=0)
+                        a_r_bead   = gr.Number(label="Bead radius (µm)",      value=defaults[20])
+                        a_mask_warmup = gr.Number(label="Mask warmup epochs (on-axis only, d/NFP frozen)", value=defaults[47], precision=0)
+                    with gr.Row():
+                        a_betas    = gr.Textbox(label="Adam betas [β1, β2] (JSON)", value=defaults[21])
+                        a_lr_phase = gr.Number(label="lr_phase_mult",         value=defaults[22])
+                        a_lr_sigma = gr.Number(label="lr_sigma_mult",         value=defaults[23])
+                        a_lr_d     = gr.Number(label="lr_d_mult",             value=defaults[24])
+                        a_lr_nfp   = gr.Number(label="lr_nfp_mult",           value=defaults[43])
 
-        # ── Advanced Config ──────────────────────────────────────────────────
-        with gr.Accordion("Advanced Config", open=False):
-            gr.Markdown("**Phase retrieval optimisation**")
-            with gr.Row():
-                a_epochs   = gr.Number(label="Epochs",               value=defaults[17], precision=0)
-                a_lr       = gr.Number(label="Learning rate",         value=defaults[18])
-                a_loss     = gr.Number(label="Loss (1=Gauss, 2=L2)", value=defaults[19], precision=0)
-                a_r_bead   = gr.Number(label="Bead radius (µm)",      value=defaults[20])
-                a_mask_warmup = gr.Number(label="Mask warmup epochs (on-axis only, d/NFP frozen)", value=defaults[47], precision=0)
-            with gr.Row():
-                a_betas    = gr.Textbox(label="Adam betas [β1, β2] (JSON)", value=defaults[21])
-                a_lr_phase = gr.Number(label="lr_phase_mult",         value=defaults[22])
-                a_lr_sigma = gr.Number(label="lr_sigma_mult",         value=defaults[23])
-                a_lr_d     = gr.Number(label="lr_d_mult",             value=defaults[24])
-                a_lr_nfp   = gr.Number(label="lr_nfp_mult",           value=defaults[43])
+                    gr.Markdown("**Per-bead fine alignment**")
+                    with gr.Row():
+                        a_fd_range = gr.Number(label="Defocus range (µm)",   value=defaults[25])
+                        a_fd_step  = gr.Number(label="Defocus step (µm)",     value=defaults[26])
+                        a_max_sh   = gr.Number(label="Max shift (px)",         value=defaults[27], precision=0)
 
-            gr.Markdown("**Per-bead fine alignment**")
-            with gr.Row():
-                a_fd_range = gr.Number(label="Defocus range (µm)",   value=defaults[25])
-                a_fd_step  = gr.Number(label="Defocus step (µm)",     value=defaults[26])
-                a_max_sh   = gr.Number(label="Max shift (px)",         value=defaults[27], precision=0)
+                    gr.Markdown("**Forward model**")
+                    with gr.Row():
+                        a_g_sigma  = gr.Number(label="g_sigma (µm)",          value=defaults[28])
+                        a_g_size   = gr.Number(label="g_size (px)",            value=defaults[29], precision=0)
+                        a_circ     = gr.Number(label="circ_scale",             value=defaults[30])
+                    a_d_init   = gr.Textbox(label="d_init (µm, empty=midpoint of [d_min, d_max] above)", value=defaults[33])
+                    gr.Markdown("*Only the NFP window's CENTER OFFSET is learned (the range length above "
+                                "is fixed). These bounds/init are sanity limits, not critical:*")
+                    with gr.Row():
+                        a_nfp_offset_init = gr.Textbox(label="nfp_offset init (µm, empty=midpoint of bounds)", value=defaults[44])
+                        a_nfp_offset_min  = gr.Number(label="nfp_offset min (µm)", value=defaults[45])
+                        a_nfp_offset_max  = gr.Number(label="nfp_offset max (µm)", value=defaults[46])
 
-            gr.Markdown("**Forward model**")
-            with gr.Row():
-                a_g_sigma  = gr.Number(label="g_sigma (µm)",          value=defaults[28])
-                a_g_size   = gr.Number(label="g_size (px)",            value=defaults[29], precision=0)
-                a_circ     = gr.Number(label="circ_scale",             value=defaults[30])
-            a_d_init   = gr.Textbox(label="d_init (µm, empty=midpoint of [d_min, d_max] above)", value=defaults[33])
-            gr.Markdown("*Only the NFP window's CENTER OFFSET is learned (the range length above "
-                        "is fixed). These bounds/init are sanity limits, not critical:*")
-            with gr.Row():
-                a_nfp_offset_init = gr.Textbox(label="nfp_offset init (µm, empty=midpoint of bounds)", value=defaults[44])
-                a_nfp_offset_min  = gr.Number(label="nfp_offset min (µm)", value=defaults[45])
-                a_nfp_offset_max  = gr.Number(label="nfp_offset max (µm)", value=defaults[46])
+                    gr.Markdown("**Camera / noise**")
+                    with gr.Row():
+                        a_baseline = gr.Textbox(label="Baseline (empty=None)", value=defaults[35])
+                        a_read_std = gr.Textbox(label="Read std (empty=None)", value=defaults[36])
+                        a_bg       = gr.Textbox(label="BG (empty=None)",       value=defaults[37])
+                    a_noisy        = gr.Checkbox(label="Non-uniform noise",    value=defaults[38])
 
-            gr.Markdown("**Camera / noise**")
-            with gr.Row():
-                a_baseline = gr.Textbox(label="Baseline (empty=None)", value=defaults[35])
-                a_read_std = gr.Textbox(label="Read std (empty=None)", value=defaults[36])
-                a_bg       = gr.Textbox(label="BG (empty=None)",       value=defaults[37])
-            a_noisy        = gr.Checkbox(label="Non-uniform noise",    value=defaults[38])
+                    gr.Markdown("**Runtime / debug**")
+                    a_save_dir = gr.Textbox(label="mask_fit_save_dir (empty=auto)",  value=defaults[39])
+                    with gr.Row():
+                        a_dbg_bfp  = gr.Checkbox(label="Debug BFP",                     value=defaults[40])
+                        a_dbg_ev   = gr.Number(label="Debug every N calls",             value=defaults[41], precision=0)
+                        a_dbg_max  = gr.Textbox(label="debug_max_emitters (empty=auto)", value=defaults[42])
 
-            gr.Markdown("**Runtime / debug**")
-            a_save_dir = gr.Textbox(label="mask_fit_save_dir (empty=auto)",  value=defaults[39])
-            with gr.Row():
-                a_dbg_bfp  = gr.Checkbox(label="Debug BFP",                     value=defaults[40])
-                a_dbg_ev   = gr.Number(label="Debug every N calls",             value=defaults[41], precision=0)
-                a_dbg_max  = gr.Textbox(label="debug_max_emitters (empty=auto)", value=defaults[42])
+            with gr.Tab("Run"):
+                with gr.Row():
+                    run_btn = gr.Button("Run Characterize PSF", variant="primary")
+                    stop_btn = gr.Button("Stop", variant="stop", interactive=False)
+                gr.Markdown("**Latest debug snapshot (live)**")
+                live_plot = gr.Plot(show_label=False)
+                log_out = gr.Textbox(label="Output Log", lines=20, interactive=False)
 
         # component list — order MUST match config_to_fields / fields_to_config
         all_fields = [
