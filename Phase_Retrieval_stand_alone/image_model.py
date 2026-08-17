@@ -151,7 +151,6 @@ class ImModel_pr(torch.nn.Module):
         self.debug_every = int(params.get("debug_every", 500//2))  # every N forward calls
         self.debug_dir = str(params.get("debug_dir", os.path.join("debug", "bfp")))
         self.debug_max_emitters = int(params.get("debug_max_emitters", 5 ))  # save first K in batch  number of beads
-        self.live_box = params.get("live_box")  # optional dict for live GUI preview (gui.py); None outside the GUI
         self._debug_call_idx = 0
         phase_mask_init = params.get('phase_mask_init')
         if phase_mask_init is not None:
@@ -234,19 +233,6 @@ class ImModel_pr(torch.nn.Module):
             y_um = float(xyzps[inx, 1].detach().cpu().item())
             z_um = float(xyzps[inx, 2].detach().cpu().item())
             nfp = float(NFPs[inx].detach().cpu().item()) if NFPs is not None else float("nan")
-
-            if self.live_box is not None and i == 0:
-                self.live_box['phase'] = phase_eff
-                self.live_box['psf'] = psf_disp
-                self.live_box['target'] = target_disp
-                self.live_box['meta'] = {
-                    'call_idx': self._debug_call_idx,
-                    'd': d_now, 'g': g_now,
-                    'x': x_um, 'y': y_um, 'z': z_um, 'nfp': nfp,
-                }
-                # 'version' must be written last: under the GIL, a reader that observes a new
-                # version has already seen the fully-written phase/psf/meta above (single writer, no lock)
-                self.live_box['version'] = self.live_box.get('version', 0) + 1
 
             n_panels = 3 if target_disp is not None else 2
             fig = plt.figure(figsize=(15 if n_panels == 3 else 10, 4), constrained_layout=True)
@@ -406,6 +392,7 @@ class ImModel_pr(torch.nn.Module):
             ef_bfp_after = ef_mask_unshifted
 
         ef_bfp_after = torch.where(circ_final_bfp > 0.5, ef_bfp_after, 0)
+        self.last_ef_bfp_phase = torch.angle(ef_bfp_after).detach()
 
         # -----------------------------------
         # image plane FFT

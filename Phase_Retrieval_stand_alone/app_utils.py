@@ -279,8 +279,76 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         betas=tuple(pr_dict['adam_betas'])
     )
 
+    # ----------------------------
+    # Live GUI panel: dense per-epoch history + periodic PSF-grid snapshot
+    # ----------------------------
+    live_box = param_dict.get('live_box')
+    live_debug_every_epochs = int(pr_dict['live_debug_every_epochs'])
+    bead_names = [name for name, _, _, _ in stacks]
+
+    loss_history = []
+    d_history = []
+    nfp_offset_history = []
+    g_sigma_history = []
+    bead_cursor = 0
+
+    def _refresh_live_panel(step, loss_val, d_now, nfp_offset_now, g_sigma_now,
+                             pred_disp, target_disp, local_bead_ids, local_zi):
+        """Unconditionally (re)builds the live_box payload from the current state.
+        Callers gate on live_box/refresh-cadence; this never appends to history."""
+        nonlocal bead_cursor
+        available_beads = torch.unique(local_bead_ids).tolist()
+        bead = available_beads[bead_cursor % len(available_beads)]
+        bead_cursor += 1
+
+        idx = torch.where(local_bead_ids == bead)[0]
+        order = torch.argsort(local_zi[idx])
+        idx = idx[order]
+
+        pred_bead = pred_disp[idx].detach().cpu().numpy()      # [Zb,H,W]
+        target_bead = target_disp[idx].detach().cpu().numpy()  # [Zb,H,W]
+
+        Zb = pred_bead.shape[0]
+        n_slices = min(7, Zb)
+        slice_idx = np.round(np.linspace(0, Zb - 1, n_slices)).astype(int)
+
+        pred_slices = np.stack([pred_bead[i] / (pred_bead[i].max() + 1e-12) for i in slice_idx], axis=0)
+        target_slices = np.stack([target_bead[i] / (target_bead[i].max() + 1e-12) for i in slice_idx], axis=0)
+
+        with torch.no_grad():
+            nfp_vals = im_model.nfps(torch.tensor(slice_idx, device=device)).detach().cpu().numpy()
+
+        mid = idx[len(idx) // 2]
+        live_box['phase'] = im_model.last_ef_bfp_phase[mid].cpu().numpy()
+        live_box['pred_slices'] = pred_slices
+        live_box['target_slices'] = target_slices
+        live_box['slice_zi'] = slice_idx.tolist()
+        live_box['slice_nfp_um'] = nfp_vals.tolist()
+        live_box['bead_name'] = bead_names[bead]
+        live_box['loss_history'] = list(loss_history)
+        live_box['d_history'] = list(d_history)
+        live_box['nfp_offset_history'] = list(nfp_offset_history)
+        live_box['g_sigma_history'] = list(g_sigma_history)
+        live_box['meta'] = {
+            'step': step, 'loss': loss_val, 'd': d_now,
+            'nfp_offset': nfp_offset_now, 'g_sigma': g_sigma_now,
+            'bead_name': bead_names[bead],
+        }
+        live_box['version'] = live_box.get('version', 0) + 1
+
+    def _update_live_panel(step, loss_val, d_now, nfp_offset_now, g_sigma_now,
+                            pred_disp, target_disp, local_bead_ids, local_zi):
+        loss_history.append(loss_val)
+        d_history.append(d_now)
+        nfp_offset_history.append(nfp_offset_now)
+        g_sigma_history.append(g_sigma_now)
+
+        if live_box is None or (step % live_debug_every_epochs) != 0:
+            return
+        _refresh_live_panel(step, loss_val, d_now, nfp_offset_now, g_sigma_now,
+                             pred_disp, target_disp, local_bead_ids, local_zi)
+
     ccs = []
-    # TODO (RK): 
     fine_defocus_range_um = float(pr_dict.get("fine_defocus_range_um", 0.6))
     fine_defocus_step_um = float(pr_dict.get("fine_defocus_step_um", 0.1))
     max_shift_px = int(pr_dict.get("max_shift_px", 10))
@@ -327,6 +395,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         print(f"[PR] mask warmup done ({mask_warmup_epochs} epochs, on-axis only) "
               f"— d/NFP unfrozen for full-batch fitting")
 
+    pred_display = target_display = d_now = nfp_offset_now = None
     for epoch in range(pr_dict['epochs']):
         if stop_event is not None and stop_event.is_set():
             print(f"[PR] stop requested — halting at epoch {epoch}")
@@ -467,6 +536,10 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         #loss = 0.2 * loss_mse + 0.8 * loss_ac
         #loss = 0.0 * loss_mse + 1.0 * loss_ac
 
+        # whichever pred/target the loss actually used this epoch, for the live panel
+        pred_display = pred if not apply_off_axis_space_invariance else pred_n
+        target_display = y_true if not apply_off_axis_space_invariance else y_aligned
+
         loss.backward()
 
         if epoch == 0:
@@ -496,7 +569,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
                     if not (os.path.isdir(path2save)):
                         os.mkdir(path2save)
                     plt.savefig(os.path.join(path2save, 'iteration_' + str(epoch) +  '.jpg'), bbox_inches='tight', dpi=300)
-                    plt.clf()
+                    plt.close()
                     # End visualization
 
         # keep sigma sane (optional but helps)
@@ -509,13 +582,26 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             cc = calculate_cc(pred2.detach().cpu().numpy(), y_true.detach().cpu().numpy())
             ccs.append(cc)
 
+            d_now = float(im_model.d_um().detach().cpu().item())
+            nfp_offset_now = float(im_model.nfp_offset_um().detach().cpu().item())
             if (epoch % 10) == 0:
-                d_now = float(im_model.d_um().detach().cpu().item())
-                nfp_offset_now = float(im_model.nfp_offset_um().detach().cpu().item())
                 print(
                     f"[PR] epoch {epoch:4d} loss={float(loss.item()):.6g}  d={d_now:.2f} um  "
                     f"g_sigma={float(im_model.g_sigma.item()):.4f}  "
                     f"nfp_offset={nfp_offset_now:.3f} um")
+
+        _update_live_panel(
+            epoch, float(loss.item()), d_now, nfp_offset_now,
+            float(im_model.g_sigma.item()), pred_display, target_display,
+            bead_ids, zi_tensor,
+        )
+
+    if live_box is not None and pred_display is not None and (epoch % live_debug_every_epochs) != 0:
+        _refresh_live_panel(
+            epoch, float(loss.item()), d_now, nfp_offset_now,
+            float(im_model.g_sigma.item()), pred_display, target_display,
+            bead_ids, zi_tensor,
+        )
 
     # save final values back
     param_dict['mask_offset_in_um'] = float(im_model.d_um().detach().cpu().item())

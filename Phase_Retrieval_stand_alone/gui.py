@@ -78,46 +78,85 @@ class _StreamToQueue(io.TextIOBase):
 
 
 def _build_live_figure(live_box: dict):
-    """Build the BFP-phase/PSF panel from the latest ImModel_pr._maybe_save_debug snapshot.
+    """Build the training-progress panel from the latest app_utils._update_live_panel snapshot:
+    effective BFP phase + a rotating bead's multi-slice PSF grid (calculated vs. experimental)
+    on top, loss/parameter history graphs on the bottom.
 
     Uses the matplotlib object-oriented API + an explicit Agg canvas (no pyplot global state),
     since this runs on the GUI polling thread while the training worker thread makes its own
     bare plt.* calls (phase_retrieval_with_displacement_iteration/iteration_<epoch>.jpg) — sharing
     pyplot's global figure stack across threads would race.
     """
-    phase, psf, target = live_box.get('phase'), live_box.get('psf'), live_box.get('target')
-    if phase is None or psf is None:
+    phase = live_box.get('phase')
+    pred_slices = live_box.get('pred_slices')
+    target_slices = live_box.get('target_slices')
+    if phase is None or pred_slices is None or target_slices is None:
         return None
+
+    slice_zi = live_box.get('slice_zi', [])
+    slice_nfp = live_box.get('slice_nfp_um', [])
+    bead_name = live_box.get('bead_name', '?')
     meta = live_box.get('meta', {})
-    n_panels = 3 if target is not None else 2
-    fig = Figure(figsize=(15 if n_panels == 3 else 10, 4), constrained_layout=True)
+    loss_hist = live_box.get('loss_history', [])
+    d_hist = live_box.get('d_history', [])
+    nfp_hist = live_box.get('nfp_offset_history', [])
+    g_hist = live_box.get('g_sigma_history', [])
+
+    n_slices = pred_slices.shape[0]
+    fig = Figure(figsize=(2.5 + 2.0 * n_slices, 8), constrained_layout=True)
     FigureCanvasAgg(fig)
+    subfig_top, subfig_bottom = fig.subfigures(2, 1, height_ratios=[2.2, 1])
 
-    ax1 = fig.add_subplot(1, n_panels, 1)
-    im1 = ax1.imshow(phase, cmap="twilight")
-    ax1.set_title("effective BFP phase")
-    ax1.axis("off")
-    fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+    # ---- top: effective BFP phase (left, spans both rows) + calculated/experimental PSF grid ----
+    top_gs = subfig_top.add_gridspec(2, 1 + n_slices, width_ratios=[1.3] + [1] * n_slices)
 
-    ax2 = fig.add_subplot(1, n_panels, 2)
-    im2 = ax2.imshow(psf, cmap="gray")
-    ax2.set_title("PSF (display norm)")
-    ax2.axis("off")
-    fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+    ax_phase = subfig_top.add_subplot(top_gs[:, 0])
+    im_phase = ax_phase.imshow(phase, cmap="twilight")
+    ax_phase.set_title("effective BFP phase")
+    ax_phase.axis("off")
+    subfig_top.colorbar(im_phase, ax=ax_phase, fraction=0.046, pad=0.04)
 
-    if target is not None:
-        ax3 = fig.add_subplot(1, n_panels, 3)
-        im3 = ax3.imshow(target, cmap="gray")
-        ax3.set_title("experimental PSF (target)")
-        ax3.axis("off")
-        fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+    for col in range(n_slices):
+        zi = slice_zi[col] if col < len(slice_zi) else col
+        nfp = slice_nfp[col] if col < len(slice_nfp) else float('nan')
 
-    fig.suptitle(
-        f"call={meta.get('call_idx', '?')}  d={meta.get('d', float('nan')):.1f}um  "
-        f"g={meta.get('g', float('nan')):.3f}  x={meta.get('x', float('nan')):.3f} "
-        f"y={meta.get('y', float('nan')):.3f} z={meta.get('z', float('nan')):.3f}  "
-        f"NFP={meta.get('nfp', float('nan')):.3f}"
-    )
+        ax_pred = subfig_top.add_subplot(top_gs[0, col + 1])
+        ax_pred.imshow(pred_slices[col], cmap="gray")
+        ax_pred.set_title(f"z{zi}\nNFP={nfp:.2f}um", fontsize=8)
+        ax_pred.set_xticks([]); ax_pred.set_yticks([])
+        if col == 0:
+            ax_pred.set_ylabel("calculated", fontsize=9)
+
+        ax_tgt = subfig_top.add_subplot(top_gs[1, col + 1])
+        ax_tgt.imshow(target_slices[col], cmap="gray")
+        ax_tgt.set_xticks([]); ax_tgt.set_yticks([])
+        if col == 0:
+            ax_tgt.set_ylabel("experimental", fontsize=9)
+
+    subfig_top.suptitle(f"bead: {bead_name}", fontsize=10)
+
+    # ---- bottom: loss + learned parameters over epochs ----
+    ax_loss, ax_d, ax_nfp, ax_g = subfig_bottom.subplots(1, 4)
+    x = list(range(len(loss_hist)))
+
+    ax_loss.plot(x, loss_hist)
+    ax_loss.set_yscale("log")
+    ax_loss.set_title(f"loss={meta.get('loss', float('nan')):.4g}", fontsize=9)
+    ax_loss.set_xlabel("epoch")
+
+    ax_d.plot(x, d_hist, color="tab:orange")
+    ax_d.set_title(f"d={meta.get('d', float('nan')):.1f}um", fontsize=9)
+    ax_d.set_xlabel("epoch")
+
+    ax_nfp.plot(x, nfp_hist, color="tab:green")
+    ax_nfp.set_title(f"nfp_offset={meta.get('nfp_offset', float('nan')):.2f}um", fontsize=9)
+    ax_nfp.set_xlabel("epoch")
+
+    ax_g.plot(x, g_hist, color="tab:red")
+    ax_g.set_title(f"g_sigma={meta.get('g_sigma', float('nan')):.3f}", fontsize=9)
+    ax_g.set_xlabel("epoch")
+
+    fig.suptitle(f"epoch {meta.get('step', '?')}")
     return fig
 
 
