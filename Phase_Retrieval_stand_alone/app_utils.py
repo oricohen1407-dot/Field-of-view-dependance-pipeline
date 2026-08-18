@@ -320,6 +320,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
 
         mid = idx[len(idx) // 2]
         live_box['phase'] = im_model.last_ef_bfp_phase[mid].cpu().numpy()
+        live_box['mask_phase'] = im_model.last_mask_plane_phase[mid].cpu().numpy()
         live_box['pred_slices'] = pred_slices
         live_box['target_slices'] = target_slices
         live_box['slice_zi'] = slice_idx.tolist()

@@ -375,6 +375,7 @@ class ImModel_pr(torch.nn.Module):
 
         ef_mask_shifted = ef_mask_shifted * phase * circ_phase
         ef_mask_shifted = torch.where(circ_phase > 0.5, ef_mask_shifted, 0)
+        self.last_mask_plane_phase = torch.angle(ef_mask_shifted).detach()
 
         # -----------------------------------
         # shift back

@@ -79,8 +79,9 @@ class _StreamToQueue(io.TextIOBase):
 
 def _build_live_figure(live_box: dict):
     """Build the training-progress panel from the latest app_utils._update_live_panel snapshot:
-    effective BFP phase + a rotating bead's multi-slice PSF grid (calculated vs. experimental)
-    on top, loss/parameter history graphs on the bottom.
+    mask-plane phase (bead-shifted) + effective BFP phase, stacked on the left, next to a rotating
+    bead's multi-slice PSF grid (calculated vs. experimental) on top, loss/parameter history
+    graphs on the bottom.
 
     Uses the matplotlib object-oriented API + an explicit Agg canvas (no pyplot global state),
     since this runs on the GUI polling thread while the training worker thread makes its own
@@ -88,9 +89,10 @@ def _build_live_figure(live_box: dict):
     pyplot's global figure stack across threads would race.
     """
     phase = live_box.get('phase')
+    mask_phase = live_box.get('mask_phase')
     pred_slices = live_box.get('pred_slices')
     target_slices = live_box.get('target_slices')
-    if phase is None or pred_slices is None or target_slices is None:
+    if phase is None or mask_phase is None or pred_slices is None or target_slices is None:
         return None
 
     slice_zi = live_box.get('slice_zi', [])
@@ -107,12 +109,19 @@ def _build_live_figure(live_box: dict):
     FigureCanvasAgg(fig)
     subfig_top, subfig_bottom = fig.subfigures(2, 1, height_ratios=[2.2, 1])
 
-    # ---- top: effective BFP phase (left, spans both rows) + calculated/experimental PSF grid ----
+    # ---- top: mask-plane phase (row 0) + effective BFP phase (row 1) on the left,
+    # ---- next to the calculated/experimental PSF grid ----
     top_gs = subfig_top.add_gridspec(2, 1 + n_slices, width_ratios=[1.3] + [1] * n_slices)
 
-    ax_phase = subfig_top.add_subplot(top_gs[:, 0])
+    ax_mask_phase = subfig_top.add_subplot(top_gs[0, 0])
+    im_mask_phase = ax_mask_phase.imshow(mask_phase, cmap="twilight")
+    ax_mask_phase.set_title("mask-plane phase\n(bead-shifted)", fontsize=9)
+    ax_mask_phase.axis("off")
+    subfig_top.colorbar(im_mask_phase, ax=ax_mask_phase, fraction=0.046, pad=0.04)
+
+    ax_phase = subfig_top.add_subplot(top_gs[1, 0])
     im_phase = ax_phase.imshow(phase, cmap="twilight")
-    ax_phase.set_title("effective BFP phase")
+    ax_phase.set_title("effective BFP phase", fontsize=9)
     ax_phase.axis("off")
     subfig_top.colorbar(im_phase, ax=ax_phase, fraction=0.046, pad=0.04)
 

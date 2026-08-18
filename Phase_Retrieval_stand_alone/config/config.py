@@ -51,10 +51,10 @@ class AdvancedConfig:
     r_bead: float = 0.02         # bead radius (um)
     adam_betas: tuple = (0.9, 0.99)   # Adam (beta1, beta2)
     lr_phase_mult: float = 100000     # phase mask LR = lr_phase_mult * learning_rate
-    lr_sigma_mult: float = 20         # g_sigma LR multiplier; raised from the root-matched default (1) — at that value g_sigma was still climbing with no sign of plateau after 250 epochs while d/nfp_offset had converged, consistent with its Adam step size (~LR) being ~100x smaller than nfp_offset's
+    lr_sigma_mult: float = 50         # g_sigma LR multiplier
     lr_d_mult: float = 5000           # mask displacement LR = lr_d_mult * learning_rate; matches root pipeline default
-    lr_nfp_mult: float = 100           # NFP center-offset LR = lr_nfp_mult * learning_rate; kept low — offset's bounds span only ~20um vs d's ~15000um, so it saturates against the wall fast at d-like multipliers
-    mask_warmup_epochs: int = 50      # initial epochs fitting phase_mask+g_sigma from the on-axis bead only, d/NFP frozen; d's gradient depends on the mask having real structure, so this gives it a head start before off-axis beads (and NFP) join in
+    lr_nfp_mult: float = 10           # NFP center-offset LR = lr_nfp_mult * learning_rate;
+    mask_warmup_epochs: int = 50      # initial epochs fitting phase_mask+g_sigma from the on-axis bead only, d/NFP frozen;
     live_debug_every_epochs: int = 10  # how often (epochs) the live GUI panel (loss/param graphs + PSF grid) refreshes
 
     # --- Per-bead fine alignment ---
