@@ -51,11 +51,11 @@ class AdvancedConfig:
     r_bead: float = 0.02         # bead radius (um)
     adam_betas: tuple = (0.9, 0.99)   # Adam (beta1, beta2)
     lr_phase_mult: float = 100000     # phase mask LR = lr_phase_mult * learning_rate
-    lr_sigma_mult: float = 50         # g_sigma LR multiplier
+    lr_sigma_mult: float = 1          # g_sigma LR multiplier;
     lr_d_mult: float = 5000           # mask displacement LR = lr_d_mult * learning_rate; matches root pipeline default
     lr_nfp_mult: float = 10           # NFP center-offset LR = lr_nfp_mult * learning_rate;
-    mask_warmup_epochs: int = 50      # initial epochs fitting phase_mask+g_sigma from the on-axis bead only, d/NFP frozen;
-    live_debug_every_epochs: int = 10  # how often (epochs) the live GUI panel (loss/param graphs + PSF grid) refreshes
+    mask_warmup_epochs: int = 100      # initial epochs fitting phase_mask only from the on-axis bead, d/NFP/g_sigma frozen;
+    live_debug_every_epochs: int = 20  # how often (epochs) the live GUI panel (loss/param graphs + PSF grid) refreshes
 
     # --- Per-bead fine alignment ---
     fine_defocus_range_um: float = 0.2
@@ -83,7 +83,7 @@ class AdvancedConfig:
     # --- Runtime / debug ---
     mask_fit_save_dir: Optional[str] = None  # None -> PROJECT_DIR/mask_fit_outputs
     debug_bfp: bool = True
-    debug_every: int = 100
+    debug_every_num_epoch: int = 10  # save on-disk debug PNGs every N epochs (not forward calls)
     debug_max_emitters: Optional[int] = None  # None -> len(offaxis_coords_pixel) + 1
 
 
@@ -123,7 +123,7 @@ class Config:
             # runtime
             'mask_fit_save_dir': a.mask_fit_save_dir,
             'debug_bfp': a.debug_bfp,
-            'debug_every': a.debug_every,
+            'debug_every_num_epoch': a.debug_every_num_epoch,
             'debug_max_emitters': a.debug_max_emitters if a.debug_max_emitters is not None
                                   else len(u.offaxis_coords_pixel) + 1,
         }

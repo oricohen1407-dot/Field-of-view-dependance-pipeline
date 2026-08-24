@@ -1,6 +1,7 @@
 import os
 import csv
 import math
+import time
 import torch
 import numpy as np
 import tifffile
@@ -291,12 +292,14 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     nfp_offset_history = []
     g_sigma_history = []
     bead_cursor = 0
+    live_panel_time_s = 0.0  # cumulative wall-clock time spent inside _refresh_live_panel
 
     def _refresh_live_panel(step, loss_val, d_now, nfp_offset_now, g_sigma_now,
                              pred_disp, target_disp, local_bead_ids, local_zi):
         """Unconditionally (re)builds the live_box payload from the current state.
         Callers gate on live_box/refresh-cadence; this never appends to history."""
-        nonlocal bead_cursor
+        nonlocal bead_cursor, live_panel_time_s
+        _panel_t0 = time.perf_counter()
         available_beads = torch.unique(local_bead_ids).tolist()
         bead = available_beads[bead_cursor % len(available_beads)]
         bead_cursor += 1
@@ -321,6 +324,8 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         mid = idx[len(idx) // 2]
         live_box['phase'] = im_model.last_ef_bfp_phase[mid].cpu().numpy()
         live_box['mask_phase'] = im_model.last_mask_plane_phase[mid].cpu().numpy()
+        shift_px = im_model.last_mask_shift_px[mid].cpu().tolist()
+        live_box['mask_shift_px'] = (int(shift_px[0]), int(shift_px[1]))
         live_box['pred_slices'] = pred_slices
         live_box['target_slices'] = target_slices
         live_box['slice_zi'] = slice_idx.tolist()
@@ -336,6 +341,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             'bead_name': bead_names[bead],
         }
         live_box['version'] = live_box.get('version', 0) + 1
+        live_panel_time_s += time.perf_counter() - _panel_t0
 
     def _update_live_panel(step, loss_val, d_now, nfp_offset_now, g_sigma_now,
                             pred_disp, target_disp, local_bead_ids, local_zi):
@@ -363,9 +369,12 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     # end
     stop_event = param_dict.get('stop_event')
 
-    # --- Phase A: mask/g_sigma warmup from the on-axis bead alone, d/NFP frozen ---
+    _timing_t0 = time.perf_counter()  # covers warmup + main loop only, for the calc-vs-display breakdown below
+
+    # --- Phase A: mask-only warmup from the on-axis bead alone, d/NFP/g_sigma frozen ---
     # d's gradient depends on the mask having real structure (see phase_retrieval physics
     # notes); this gives the mask (fast LR) a head start before off-axis beads and NFP join in.
+    # g_sigma is frozen too so the optimizer can't lower loss via blur instead of real mask structure.
     mask_warmup_epochs = int(pr_dict['mask_warmup_epochs'])
     if mask_warmup_epochs > 0:
         onaxis_idx = torch.where(is_onaxis)[0]
@@ -375,11 +384,13 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
 
         im_model.d_raw.requires_grad_(False)
         im_model.nfp_offset_raw.requires_grad_(False)
+        im_model.g_sigma.requires_grad_(False)
 
         for warmup_epoch in range(mask_warmup_epochs):
             if stop_event is not None and stop_event.is_set():
                 print(f"[PR][warmup] stop requested — halting at epoch {warmup_epoch}")
                 break
+            im_model.current_epoch = warmup_epoch
             opt.zero_grad()
             pred = im_model(xyzps_onaxis, im_model.nfps(zi_onaxis), targets=y_onaxis)
             loss = F.mse_loss(pred, y_onaxis)
@@ -387,20 +398,34 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             opt.step()
             with torch.no_grad():
                 im_model.g_sigma.clamp_(min=1e-3, max=20.0)
-            if (warmup_epoch % 10) == 0:
-                print(f"[PR][warmup] epoch {warmup_epoch:4d} loss={float(loss.item()):.6g} "
-                      f"g_sigma={float(im_model.g_sigma.item()):.4f}")
+            is_last_warmup_epoch = warmup_epoch == mask_warmup_epochs - 1
+            if (warmup_epoch % 10) == 0 or is_last_warmup_epoch:
+                print(f"[PR][warmup] epoch {warmup_epoch:4d} loss={float(loss.item()):.6g}")
+
+            if live_box is not None and ((warmup_epoch % live_debug_every_epochs) == 0 or is_last_warmup_epoch):
+                _refresh_live_panel(
+                    warmup_epoch, float(loss.item()),
+                    float(im_model.d_um().detach().cpu().item()),
+                    float(im_model.nfp_offset_um().detach().cpu().item()),
+                    float(im_model.g_sigma.item()),
+                    pred, y_onaxis,
+                    bead_ids[onaxis_idx], zi_onaxis,
+                )
 
         im_model.d_raw.requires_grad_(True)
         im_model.nfp_offset_raw.requires_grad_(True)
+        im_model.g_sigma.requires_grad_(True)
         print(f"[PR] mask warmup done ({mask_warmup_epochs} epochs, on-axis only) "
-              f"— d/NFP unfrozen for full-batch fitting")
+              f"— d/NFP/g_sigma unfrozen for full-batch fitting")
 
     pred_display = target_display = d_now = nfp_offset_now = None
     for epoch in range(pr_dict['epochs']):
         if stop_event is not None and stop_event.is_set():
             print(f"[PR] stop requested — halting at epoch {epoch}")
             break
+        # continues on from the warmup phase's own 0..mask_warmup_epochs-1 numbering, so
+        # on-disk debug filenames never collide between the two phases
+        im_model.current_epoch = mask_warmup_epochs + epoch
         opt.zero_grad()
         NFPs = im_model.nfps(zi_tensor)  # depends on the live nfp_offset_raw
         apply_off_axis_space_invariance = (max_shift_px > 0)
@@ -604,6 +629,16 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             bead_ids, zi_tensor,
         )
 
+    _total_time_s = time.perf_counter() - _timing_t0
+    _calc_time_s = max(0.0, _total_time_s - im_model.debug_save_time_s - live_panel_time_s)
+    if _total_time_s > 0:
+        print(
+            f"[PR] timing breakdown (warmup+main loop): total={_total_time_s:.1f}s  "
+            f"calculation={_calc_time_s:.1f}s ({100*_calc_time_s/_total_time_s:.1f}%)  "
+            f"debug_png_dump={im_model.debug_save_time_s:.1f}s ({100*im_model.debug_save_time_s/_total_time_s:.1f}%)  "
+            f"live_panel={live_panel_time_s:.1f}s ({100*live_panel_time_s/_total_time_s:.1f}%)"
+        )
+
     # save final values back
     param_dict['mask_offset_in_um'] = float(im_model.d_um().detach().cpu().item())
     print(f"[PR] done. best d = {param_dict['mask_offset_in_um']:.2f} um")
@@ -673,9 +708,10 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
     # --- Final per-bead debug dump (central z only) ---
     # Put debug outputs inside the same phase_retrieval_outputs folder
     im_model.debug_bfp = True
-    im_model.debug_every = 1
+    im_model.debug_every_num_epoch = 1
+    im_model.current_epoch = 0
+    im_model._last_debug_epoch = None
     im_model.debug_dir = os.path.join(save_dir, "per_bead_phase")
-    im_model._debug_call_idx = 0
 
     # number of beads you used in PR (onaxis + offaxis)
     num_beads = len(stacks)

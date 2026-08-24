@@ -1,5 +1,6 @@
 import torch
 import os
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 import math
@@ -148,10 +149,12 @@ class ImModel_pr(torch.nn.Module):
         # DEBUG: BFP logging  #27/01/2026
         # -------------------------
         self.debug_bfp = bool(params.get("debug_bfp", True))  # hard-code True if you want
-        self.debug_every = int(params.get("debug_every", 500//2))  # every N forward calls
+        self.debug_every_num_epoch = int(params.get("debug_every_num_epoch", 10))  # every N epochs
         self.debug_dir = str(params.get("debug_dir", os.path.join("debug", "bfp")))
         self.debug_max_emitters = int(params.get("debug_max_emitters", 5 ))  # save first K in batch  number of beads
-        self._debug_call_idx = 0
+        self.current_epoch = 0  # set by the caller (app_utils.py) before each epoch's forward calls
+        self._last_debug_epoch = None  # guards against dumping more than once per qualifying epoch
+        self.debug_save_time_s = 0.0  # cumulative wall-clock time spent inside _maybe_save_debug
         phase_mask_init = params.get('phase_mask_init')
         if phase_mask_init is not None:
             self.phase_mask = torch.tensor(phase_mask_init, device=self.device, dtype=torch.float32, requires_grad=True)
@@ -183,10 +186,11 @@ class ImModel_pr(torch.nn.Module):
     def _maybe_save_debug(self, ef_bfp_eff, psfs, xyzps, NFPs, targets=None):
         if not self.debug_bfp:
             return
-
-        self._debug_call_idx += 1
-        if (self._debug_call_idx % self.debug_every) != 0:
+        if (self.current_epoch % self.debug_every_num_epoch) != 0:
             return
+        if self._last_debug_epoch == self.current_epoch:
+            return  # already dumped this epoch — forward() runs many times per epoch
+        self._last_debug_epoch = self.current_epoch
 
         os.makedirs(self.debug_dir, exist_ok=True)
 
@@ -257,10 +261,10 @@ class ImModel_pr(torch.nn.Module):
                 fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
 
             fig.suptitle(
-                f"call={self._debug_call_idx}  d={d_now:.1f}um  g={g_now:.3f}  "
+                f"epoch={self.current_epoch}  d={d_now:.1f}um  g={g_now:.3f}  "
                 f"x={x_um:.3f} y={y_um:.3f} z={z_um:.3f}  NFP={nfp:.3f}"
             )
-            out = os.path.join(subdir, f"call_{self._debug_call_idx:06d}.png")
+            out = os.path.join(subdir, f"epoch_{self.current_epoch:06d}.png")
             fig.savefig(out, dpi=200, bbox_inches="tight")
             plt.close(fig)
 
@@ -360,6 +364,7 @@ class ImModel_pr(torch.nn.Module):
 
         dx_mask_px = torch.round(dx_mask_px).to(torch.int64)
         dy_mask_px = torch.round(dy_mask_px).to(torch.int64)
+        self.last_mask_shift_px = torch.stack([dx_mask_px, dy_mask_px], dim=1).detach()  # [B,2]
         # -----------------------------------
         # shift complex field at mask plane
         ef_mask_shifted = []
@@ -420,6 +425,8 @@ class ImModel_pr(torch.nn.Module):
 
         # debug
         if self.debug_bfp:
+            _debug_t0 = time.perf_counter()
             self._maybe_save_debug(ef_bfp_after, psfs, xyzps, NFPs, targets)
+            self.debug_save_time_s += time.perf_counter() - _debug_t0
 
         return psfs

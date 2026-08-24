@@ -1,6 +1,7 @@
 """Gradio web interface for DeepSTORM3D PSF characterization."""
 import io
 import json
+import os
 import queue
 import sys
 import threading
@@ -34,11 +35,15 @@ CRITICAL_CSS = """
 
 
 def _default_config() -> Config:
-    """Same experiment defaults main.py uses, for when no saved config.json exists yet."""
+    """Same experiment defaults main.py uses, for when no saved config.json exists yet.
+
+    project_dir points directly at the folder holding the z-stack files (folded together with
+    ZSTACK_FILES_PATH) rather than relying on zstack_folder, since the GUI no longer exposes
+    that field — it always constructs UserConfig with zstack_folder defaulted to "".
+    """
     return Config(
         user=UserConfig(
-            project_dir=str(DATA_ROOT_DIR),
-            zstack_folder=str(ZSTACK_FILES_PATH),
+            project_dir=str(DATA_ROOT_DIR / ZSTACK_FILES_PATH),
             zstack_file=ZSTACK_FILE,
             central_bead_coordinates_pixel=CENTRAL_BEAD_COORDINATES_PIXEL,
             offaxis_zstack_files=OFFAXIS_ZSTACK_FILES,
@@ -90,6 +95,7 @@ def _build_live_figure(live_box: dict):
     """
     phase = live_box.get('phase')
     mask_phase = live_box.get('mask_phase')
+    mask_shift_px = live_box.get('mask_shift_px', (0, 0))
     pred_slices = live_box.get('pred_slices')
     target_slices = live_box.get('target_slices')
     if phase is None or mask_phase is None or pred_slices is None or target_slices is None:
@@ -115,7 +121,8 @@ def _build_live_figure(live_box: dict):
 
     ax_mask_phase = subfig_top.add_subplot(top_gs[0, 0])
     im_mask_phase = ax_mask_phase.imshow(mask_phase, cmap="twilight")
-    ax_mask_phase.set_title("mask-plane phase\n(bead-shifted)", fontsize=9)
+    dx_px, dy_px = mask_shift_px
+    ax_mask_phase.set_title(f"mask-plane phase\n(bead-shifted, Δ=({dx_px},{dy_px})px)", fontsize=9)
     ax_mask_phase.axis("off")
     subfig_top.colorbar(im_mask_phase, ax=ax_mask_phase, fraction=0.046, pad=0.04)
 
@@ -191,9 +198,9 @@ def config_to_fields(cfg: Config) -> list:
         # ── Microscope preset fields, part 1 (7 of 8 — bitdepth is with AdvancedConfig below) ──
         u.M, u.NA, u.n_immersion, u.lamda, u.n_sample,
         u.f_4f, u.ps_camera, u.ps_BFP,
-        # ── UserConfig geometry / data (9) ─────────────────────────────────
+        # ── UserConfig geometry / data (8) ─────────────────────────────────
         u.nfp_range_um, u.zrange,
-        u.project_dir, u.zstack_folder,
+        u.project_dir,
         u.zstack_file,
         json.dumps(u.central_bead_coordinates_pixel),
         "\n".join(u.offaxis_zstack_files),
@@ -214,7 +221,7 @@ def config_to_fields(cfg: Config) -> list:
         a.non_uniform_noise_flag,
         a.mask_fit_save_dir or "",
         a.debug_bfp,
-        a.debug_every,
+        a.debug_every_num_epoch,
         "" if a.debug_max_emitters is None else str(a.debug_max_emitters),
         # ── NFP center offset (learned) — appended, keeps every index above stable ───
         a.lr_nfp_mult,
@@ -229,9 +236,9 @@ def fields_to_config(
     # Microscope preset fields, part 1 (7 of 8)
     M, NA, n_immersion, lamda, n_sample,
     f_4f, ps_camera, ps_BFP,
-    # UserConfig geometry / data (9)
+    # UserConfig geometry / data (8)
     nfp_range_um, zrange,
-    project_dir, zstack_folder,
+    project_dir,
     zstack_file,
     central_bead_json, offaxis_files_text, offaxis_coords_json,
     external_mask,
@@ -246,7 +253,7 @@ def fields_to_config(
     baseline, read_std, bg,
     non_uniform_noise_flag,
     mask_fit_save_dir,
-    debug_bfp, debug_every, debug_max_emitters,
+    debug_bfp, debug_every_num_epoch, debug_max_emitters,
     lr_nfp_mult, nfp_offset_init_um, nfp_offset_min_um, nfp_offset_max_um,
     mask_warmup_epochs,
 ) -> Config:
@@ -263,7 +270,6 @@ def fields_to_config(
             f_4f=float(f_4f), ps_camera=float(ps_camera), ps_BFP=float(ps_BFP),
             nfp_range_um=float(nfp_range_um), zrange=str(zrange),
             project_dir=str(project_dir).strip(),
-            zstack_folder=str(zstack_folder).strip(),
             zstack_file=str(zstack_file).strip(),
             central_bead_coordinates_pixel=json.loads(str(central_bead_json)),
             offaxis_zstack_files=offaxis_files,
@@ -295,7 +301,7 @@ def fields_to_config(
             non_uniform_noise_flag=bool(non_uniform_noise_flag),
             mask_fit_save_dir=_opt_str(mask_fit_save_dir),
             debug_bfp=bool(debug_bfp),
-            debug_every=int(float(debug_every)),
+            debug_every_num_epoch=int(float(debug_every_num_epoch)),
             debug_max_emitters=_opt_int(debug_max_emitters),
             lr_nfp_mult=float(lr_nfp_mult),
             nfp_offset_init_um=_opt_float(nfp_offset_init_um),
@@ -339,31 +345,39 @@ def build_demo() -> gr.Blocks:
                 # ── Critical config ──────────────────────────────────────────────────
                 with gr.Group(elem_classes=["critical-config"]):
                     gr.Markdown("## ⚠️ Critical — configure before running")
+                    gr.Markdown("These vary per experiment — double-check before every run.")
+
                     gr.Markdown(
-                        "These change per experiment and have no safe generic default — "
-                        "double-check them before every run."
+                        "**Calibration folder** — browse to auto-fill the files below, "
+                        "pick the on-axis file, then add coordinates."
                     )
                     with gr.Row():
-                        u_nfp_range = gr.Number(
-                            label="NFP z-range length (µm) — from experiment; CENTER offset is learned",
-                            value=defaults[8],
+                        folder_upload = gr.File(
+                            label="Browse for calibration data folder",
+                            file_count="directory",
                         )
-                        u_lamda    = gr.Number(label="λ emission (µm)",         value=defaults[3])
-                    with gr.Row():
-                        a_d_min    = gr.Number(label="d_min (µm) — mask displacement search lower bound", value=defaults[31])
-                        a_d_max    = gr.Number(label="d_max (µm) — mask displacement search upper bound", value=defaults[32])
-                    u_zstack_folder = gr.Textbox(label="Z-stack folder (relative to project root)", value=defaults[11])
-                    u_zstack      = gr.Textbox(label="Z-stack file (central bead, filename only)", value=defaults[12])
-                    u_central     = gr.Textbox(
-                        label="Central bead coords [row, col] (JSON)", value=defaults[13],
+                        with gr.Column():
+                            onaxis_picker = gr.Dropdown(
+                                label="Which file is the on-axis (central) bead?", choices=[],
+                            )
+                            move_onaxis_btn = gr.Button("Move to Central Bead field")
+                    scan_status = gr.Textbox(
+                        show_label=False, interactive=False,
+                        placeholder="Folder scan status appears here",
                     )
+                    with gr.Row():
+                        u_nfp_range = gr.Number(label="NFP z-range (µm)", value=defaults[8])
+                        u_lamda    = gr.Number(label="λ emission (µm)",   value=defaults[3])
+                    with gr.Row():
+                        a_d_min    = gr.Number(label="d_min (µm)", value=defaults[30])
+                        a_d_max    = gr.Number(label="d_max (µm)", value=defaults[31])
+                    u_zstack      = gr.Textbox(label="Central bead file (filename only)", value=defaults[11])
+                    u_central     = gr.Textbox(label="Central bead coords [row, col] (JSON)", value=defaults[12])
                     u_offax_files = gr.Textbox(
-                        label="Off-axis Z-stack files (filenames only, one per line)",
-                        value=defaults[14], lines=5,
+                        label="Off-axis files (one per line)", value=defaults[13], lines=5,
                     )
                     u_offax_coord = gr.Textbox(
-                        label="Off-axis pixel coords [[row, col], ...] (JSON)",
-                        value=defaults[15], lines=3,
+                        label="Off-axis coords [[row, col], ...] (JSON)", value=defaults[14], lines=3,
                     )
 
                 # ── Microscope setup (named presets) ────────────────────────────────
@@ -386,7 +400,7 @@ def build_demo() -> gr.Blocks:
                         m_f4f      = gr.Number(label="f_4f (µm)",               value=defaults[5])
                         m_ps_cam   = gr.Number(label="Camera pixel size (µm)",  value=defaults[6])
                         m_ps_BFP   = gr.Number(label="BFP pixel size (µm)",     value=defaults[7])
-                        m_bitdepth = gr.Number(label="Bit depth",               value=defaults[34], precision=0)
+                        m_bitdepth = gr.Number(label="Bit depth",               value=defaults[33], precision=0)
                     with gr.Row():
                         m_name     = gr.Textbox(label="Save current values as new microscope named:")
                         m_save_btn = gr.Button("Save as Microscope")
@@ -397,63 +411,65 @@ def build_demo() -> gr.Blocks:
                     gr.Markdown("### Other settings")
                     u_zrange   = gr.Textbox(label='zrange ("min, max" µm, display only)', value=defaults[9])
                     u_project_dir = gr.Textbox(
-                        label="Project root dir (derived — usually leave as-is)", value=defaults[10],
+                        label="Project root dir (auto-filled by Browse above — points at a "
+                              "temp upload copy; edit manually if needed)",
+                        value=defaults[10],
                     )
                     u_ext_mask = gr.Textbox(
                         label="Starting-guess mask for phase retrieval (.npy/.mat path, optional)",
-                        value=defaults[16],
+                        value=defaults[15],
                     )
 
                 # ── Advanced Config ──────────────────────────────────────────────────
                 with gr.Accordion("Advanced Config", open=False):
                     gr.Markdown("**Phase retrieval optimisation**")
                     with gr.Row():
-                        a_epochs   = gr.Number(label="Epochs",               value=defaults[17], precision=0)
-                        a_lr       = gr.Number(label="Learning rate",         value=defaults[18])
-                        a_loss     = gr.Number(label="Loss (1=Gauss, 2=L2)", value=defaults[19], precision=0)
-                        a_r_bead   = gr.Number(label="Bead radius (µm)",      value=defaults[20])
-                        a_mask_warmup = gr.Number(label="Mask warmup epochs (on-axis only, d/NFP frozen)", value=defaults[47], precision=0)
+                        a_epochs   = gr.Number(label="Epochs",               value=defaults[16], precision=0)
+                        a_lr       = gr.Number(label="Learning rate",         value=defaults[17])
+                        a_loss     = gr.Number(label="Loss (1=Gauss, 2=L2)", value=defaults[18], precision=0)
+                        a_r_bead   = gr.Number(label="Bead radius (µm)",      value=defaults[19])
+                        a_mask_warmup = gr.Number(label="Mask warmup epochs (on-axis only, d/NFP frozen)", value=defaults[46], precision=0)
                     with gr.Row():
-                        a_betas    = gr.Textbox(label="Adam betas [β1, β2] (JSON)", value=defaults[21])
-                        a_lr_phase = gr.Number(label="lr_phase_mult",         value=defaults[22])
-                        a_lr_sigma = gr.Number(label="lr_sigma_mult",         value=defaults[23])
-                        a_lr_d     = gr.Number(label="lr_d_mult",             value=defaults[24])
-                        a_lr_nfp   = gr.Number(label="lr_nfp_mult",           value=defaults[43])
+                        a_betas    = gr.Textbox(label="Adam betas [β1, β2] (JSON)", value=defaults[20])
+                        a_lr_phase = gr.Number(label="lr_phase_mult",         value=defaults[21])
+                        a_lr_sigma = gr.Number(label="lr_sigma_mult",         value=defaults[22])
+                        a_lr_d     = gr.Number(label="lr_d_mult",             value=defaults[23])
+                        a_lr_nfp   = gr.Number(label="lr_nfp_mult",           value=defaults[42])
 
                     gr.Markdown("**Per-bead fine alignment**")
                     with gr.Row():
-                        a_fd_range = gr.Number(label="Defocus range (µm)",   value=defaults[25])
-                        a_fd_step  = gr.Number(label="Defocus step (µm)",     value=defaults[26])
-                        a_max_sh   = gr.Number(label="Max shift (px)",         value=defaults[27], precision=0)
+                        a_fd_range = gr.Number(label="Defocus range (µm)",   value=defaults[24])
+                        a_fd_step  = gr.Number(label="Defocus step (µm)",     value=defaults[25])
+                        a_max_sh   = gr.Number(label="Max shift (px)",         value=defaults[26], precision=0)
 
                     gr.Markdown("**Forward model**")
                     with gr.Row():
-                        a_g_sigma  = gr.Number(label="g_sigma (µm)",          value=defaults[28])
-                        a_g_size   = gr.Number(label="g_size (px)",            value=defaults[29], precision=0)
-                        a_circ     = gr.Number(label="circ_scale",             value=defaults[30])
-                    a_d_init   = gr.Textbox(label="d_init (µm, empty=midpoint of [d_min, d_max] above)", value=defaults[33])
+                        a_g_sigma  = gr.Number(label="g_sigma (µm)",          value=defaults[27])
+                        a_g_size   = gr.Number(label="g_size (px)",            value=defaults[28], precision=0)
+                        a_circ     = gr.Number(label="circ_scale",             value=defaults[29])
+                    a_d_init   = gr.Textbox(label="d_init (µm, empty=midpoint of [d_min, d_max] above)", value=defaults[32])
                     gr.Markdown("*Only the NFP window's CENTER OFFSET is learned (the range length above "
                                 "is fixed). These bounds/init are sanity limits, not critical:*")
                     with gr.Row():
-                        a_nfp_offset_init = gr.Textbox(label="nfp_offset init (µm, empty=midpoint of bounds)", value=defaults[44])
-                        a_nfp_offset_min  = gr.Number(label="nfp_offset min (µm)", value=defaults[45])
-                        a_nfp_offset_max  = gr.Number(label="nfp_offset max (µm)", value=defaults[46])
+                        a_nfp_offset_init = gr.Textbox(label="nfp_offset init (µm, empty=midpoint of bounds)", value=defaults[43])
+                        a_nfp_offset_min  = gr.Number(label="nfp_offset min (µm)", value=defaults[44])
+                        a_nfp_offset_max  = gr.Number(label="nfp_offset max (µm)", value=defaults[45])
 
                     gr.Markdown("**Camera / noise**")
                     with gr.Row():
-                        a_baseline = gr.Textbox(label="Baseline (empty=None)", value=defaults[35])
-                        a_read_std = gr.Textbox(label="Read std (empty=None)", value=defaults[36])
-                        a_bg       = gr.Textbox(label="BG (empty=None)",       value=defaults[37])
-                    a_noisy        = gr.Checkbox(label="Non-uniform noise",    value=defaults[38])
+                        a_baseline = gr.Textbox(label="Baseline (empty=None)", value=defaults[34])
+                        a_read_std = gr.Textbox(label="Read std (empty=None)", value=defaults[35])
+                        a_bg       = gr.Textbox(label="BG (empty=None)",       value=defaults[36])
+                    a_noisy        = gr.Checkbox(label="Non-uniform noise",    value=defaults[37])
 
                     gr.Markdown("**Runtime / debug**")
-                    a_save_dir = gr.Textbox(label="mask_fit_save_dir (empty=auto)",  value=defaults[39])
+                    a_save_dir = gr.Textbox(label="mask_fit_save_dir (empty=auto)",  value=defaults[38])
                     with gr.Row():
-                        a_dbg_bfp  = gr.Checkbox(label="Debug BFP",                     value=defaults[40])
-                        a_dbg_ev   = gr.Number(label="Debug every N calls",             value=defaults[41], precision=0)
-                        a_dbg_max  = gr.Textbox(label="debug_max_emitters (empty=auto)", value=defaults[42])
+                        a_dbg_ev   = gr.Number(label="Debug every N epochs",            value=defaults[40], precision=0)
+                        a_dbg_max  = gr.Textbox(label="debug_max_emitters (empty=auto)", value=defaults[41])
 
             with gr.Tab("Run"):
+                a_dbg_bfp = gr.Checkbox(label="Save debug images to disk", value=defaults[39])
                 with gr.Row():
                     run_btn = gr.Button("Run Characterize PSF", variant="primary")
                     stop_btn = gr.Button("Stop", variant="stop", interactive=False)
@@ -466,7 +482,7 @@ def build_demo() -> gr.Blocks:
             m_M, m_NA, m_n_imm, u_lamda, m_n_sample,
             m_f4f, m_ps_cam, m_ps_BFP,
             u_nfp_range, u_zrange,
-            u_project_dir, u_zstack_folder,
+            u_project_dir,
             u_zstack, u_central, u_offax_files, u_offax_coord, u_ext_mask,
             a_epochs, a_lr, a_loss, a_r_bead,
             a_betas, a_lr_phase, a_lr_sigma, a_lr_d,
@@ -503,6 +519,32 @@ def build_demo() -> gr.Blocks:
                 return f"Saved to {DEFAULT_SAVE_PATH}"
             except Exception as exc:
                 return f"[ERROR] {exc}"
+
+        def scan_folder_handler(file_paths):
+            if not file_paths:
+                return gr.skip(), gr.skip(), gr.skip(), "No folder selected."
+            tif_paths = [f for f in file_paths if str(f).lower().endswith((".tif", ".tiff"))]
+            if not tif_paths:
+                return gr.skip(), gr.skip(), gr.skip(), "No .tif files found in the selected folder."
+            folder = os.path.commonpath(tif_paths)
+            names = sorted(os.path.basename(p) for p in tif_paths)
+            return (
+                folder, "\n".join(names),
+                gr.update(choices=names, value=None),
+                f"Found {len(names)} .tif file(s) in {folder}",
+            )
+
+        def move_onaxis_handler(selected, offaxis_text):
+            if not selected:
+                return gr.skip(), gr.skip(), gr.skip(), "Pick a file from the dropdown first."
+            lines = [ln.strip() for ln in str(offaxis_text).strip().split("\n") if ln.strip()]
+            if selected not in lines:
+                return gr.skip(), gr.skip(), gr.skip(), f"'{selected}' is not in the off-axis list."
+            lines.remove(selected)
+            return (
+                selected, "\n".join(lines), gr.update(choices=lines, value=None),
+                f"Moved '{selected}' to the central-bead field.",
+            )
 
         def microscope_load_handler(name):
             data = _load_microscopes()
@@ -605,6 +647,14 @@ def build_demo() -> gr.Blocks:
 
         load_file.change(fn=load_handler, inputs=load_file, outputs=all_fields)
         save_btn.click(fn=save_handler, inputs=all_fields, outputs=save_status)
+        folder_upload.upload(
+            fn=scan_folder_handler, inputs=[folder_upload],
+            outputs=[u_project_dir, u_offax_files, onaxis_picker, scan_status],
+        )
+        move_onaxis_btn.click(
+            fn=move_onaxis_handler, inputs=[onaxis_picker, u_offax_files],
+            outputs=[u_zstack, u_offax_files, onaxis_picker, scan_status],
+        )
         m_dropdown.change(fn=microscope_load_handler, inputs=m_dropdown, outputs=microscope_fields)
         m_save_btn.click(fn=microscope_save_handler, inputs=[m_name] + microscope_fields, outputs=[m_dropdown, m_status])
         run_btn.click(fn=run_handler, inputs=all_fields, outputs=[log_out, live_plot, run_btn, stop_btn])
