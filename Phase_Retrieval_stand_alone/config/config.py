@@ -53,7 +53,7 @@ class AdvancedConfig:
     lr_phase_mult: float = 100000     # phase mask LR = lr_phase_mult * learning_rate
     lr_sigma_mult: float = 1          # g_sigma LR multiplier;
     lr_d_mult: float = 5000           # mask displacement LR = lr_d_mult * learning_rate; matches root pipeline default
-    lr_nfp_mult: float = 10           # NFP center-offset LR = lr_nfp_mult * learning_rate;
+    lr_nfp_mult: float = 20           # NFP center-offset LR = lr_nfp_mult * learning_rate;
     mask_warmup_epochs: int = 100      # initial epochs fitting phase_mask only from the on-axis bead, d/NFP/g_sigma frozen;
     live_debug_every_epochs: int = 20  # how often (epochs) the live GUI panel (loss/param graphs + PSF grid) refreshes
 

@@ -371,10 +371,10 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
 
     _timing_t0 = time.perf_counter()  # covers warmup + main loop only, for the calc-vs-display breakdown below
 
-    # --- Phase A: mask-only warmup from the on-axis bead alone, d/NFP/g_sigma frozen ---
+    # --- Phase A: mask-only warmup from the on-axis bead alone, d/NFP/g_sigma held fixed ---
     # d's gradient depends on the mask having real structure (see phase_retrieval physics
     # notes); this gives the mask (fast LR) a head start before off-axis beads and NFP join in.
-    # g_sigma is frozen too so the optimizer can't lower loss via blur instead of real mask structure.
+    # g_sigma is held fixed too so the optimizer can't lower loss via blur instead of real mask structure.
     mask_warmup_epochs = int(pr_dict['mask_warmup_epochs'])
     if mask_warmup_epochs > 0:
         onaxis_idx = torch.where(is_onaxis)[0]
@@ -382,9 +382,7 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         y_onaxis = y_true[onaxis_idx]
         zi_onaxis = zi_tensor[onaxis_idx]
 
-        im_model.d_raw.requires_grad_(False)
-        im_model.nfp_offset_raw.requires_grad_(False)
-        im_model.g_sigma.requires_grad_(False)
+        held_fixed = [im_model.d_raw, im_model.nfp_offset_raw, im_model.g_sigma]
 
         for warmup_epoch in range(mask_warmup_epochs):
             if stop_event is not None and stop_event.is_set():
@@ -395,9 +393,14 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             pred = im_model(xyzps_onaxis, im_model.nfps(zi_onaxis), targets=y_onaxis)
             loss = F.mse_loss(pred, y_onaxis)
             loss.backward()
+
+            snapshots = [p.detach().clone() for p in held_fixed]
             opt.step()
             with torch.no_grad():
+                for p, snap in zip(held_fixed, snapshots):
+                    p.copy_(snap)
                 im_model.g_sigma.clamp_(min=1e-3, max=20.0)
+
             is_last_warmup_epoch = warmup_epoch == mask_warmup_epochs - 1
             if (warmup_epoch % 10) == 0 or is_last_warmup_epoch:
                 print(f"[PR][warmup] epoch {warmup_epoch:4d} loss={float(loss.item()):.6g}")
@@ -412,11 +415,8 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
                     bead_ids[onaxis_idx], zi_onaxis,
                 )
 
-        im_model.d_raw.requires_grad_(True)
-        im_model.nfp_offset_raw.requires_grad_(True)
-        im_model.g_sigma.requires_grad_(True)
         print(f"[PR] mask warmup done ({mask_warmup_epochs} epochs, on-axis only) "
-              f"— d/NFP/g_sigma unfrozen for full-batch fitting")
+              f"— d/NFP/g_sigma now free to move, Adam momentum already warmed up")
 
     pred_display = target_display = d_now = nfp_offset_now = None
     for epoch in range(pr_dict['epochs']):

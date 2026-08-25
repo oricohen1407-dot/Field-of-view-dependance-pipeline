@@ -116,8 +116,7 @@ def _build_live_figure(live_box: dict):
     subfig_top, subfig_bottom = fig.subfigures(2, 1, height_ratios=[2.2, 1])
 
     # ---- top: mask-plane phase (row 0) + effective BFP phase (row 1) on the left,
-    # ---- next to the calculated/experimental PSF grid ----
-    top_gs = subfig_top.add_gridspec(2, 1 + n_slices, width_ratios=[1.3] + [1] * n_slices)
+    top_gs = subfig_top.add_gridspec(2, 2 + n_slices, width_ratios=[1.3, 0.08] + [1] * n_slices)
 
     ax_mask_phase = subfig_top.add_subplot(top_gs[0, 0])
     im_mask_phase = ax_mask_phase.imshow(mask_phase, cmap="twilight")
@@ -132,18 +131,23 @@ def _build_live_figure(live_box: dict):
     ax_phase.axis("off")
     subfig_top.colorbar(im_phase, ax=ax_phase, fraction=0.046, pad=0.04)
 
+    ax_sep = subfig_top.add_subplot(top_gs[:, 1])
+    ax_sep.set_xlim(0, 1)
+    ax_sep.axvline(0.5, color="black", linewidth=3, alpha=0.8)
+    ax_sep.axis("off")
+
     for col in range(n_slices):
         zi = slice_zi[col] if col < len(slice_zi) else col
         nfp = slice_nfp[col] if col < len(slice_nfp) else float('nan')
 
-        ax_pred = subfig_top.add_subplot(top_gs[0, col + 1])
+        ax_pred = subfig_top.add_subplot(top_gs[0, col + 2])
         ax_pred.imshow(pred_slices[col], cmap="gray")
         ax_pred.set_title(f"z{zi}\nNFP={nfp:.2f}um", fontsize=8)
         ax_pred.set_xticks([]); ax_pred.set_yticks([])
         if col == 0:
             ax_pred.set_ylabel("calculated", fontsize=9)
 
-        ax_tgt = subfig_top.add_subplot(top_gs[1, col + 1])
+        ax_tgt = subfig_top.add_subplot(top_gs[1, col + 2])
         ax_tgt.imshow(target_slices[col], cmap="gray")
         ax_tgt.set_xticks([]); ax_tgt.set_yticks([])
         if col == 0:
@@ -322,9 +326,9 @@ def build_demo() -> gr.Blocks:
         except Exception:
             pass
 
-    with gr.Blocks(title="DeepSTORM3D") as demo:
+    with gr.Blocks(title="DeepSTORM3D — FOV-dependance") as demo:
         gr.HTML(f"<style>{CRITICAL_CSS}</style>")
-        gr.Markdown("# DeepSTORM3D — PSF Characterization")
+        gr.Markdown("# DeepSTORM3D — FOV-dependance PSF Characterization")
 
         with gr.Tabs():
             with gr.Tab("Configure"):
