@@ -418,6 +418,14 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         print(f"[PR] mask warmup done ({mask_warmup_epochs} epochs, on-axis only) "
               f"— d/NFP/g_sigma now free to move, Adam momentum already warmed up")
 
+    # Track the best (lowest-loss) main-loop state so the run's final output reflects the
+    # best point found, not wherever training happened to end up — loss can tick back up after
+    # its minimum (e.g. g_sigma drifting late, noisy per-bead alignment search), so the last
+    # epoch isn't necessarily the best one. Only main-loop epochs are compared (all beads, same
+    # loss formulation) — warmup loss (on-axis only) isn't comparable, per existing design.
+    best_loss = float('inf')
+    best_state = None
+
     pred_display = target_display = d_now = nfp_offset_now = None
     for epoch in range(pr_dict['epochs']):
         if stop_event is not None and stop_event.is_set():
@@ -568,6 +576,18 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
 
         loss.backward()
 
+        # snapshot the state that produced this epoch's loss (pre-step — opt.step() below
+        # would otherwise move phase_mask/g_sigma/d_raw/nfp_offset_raw past it)
+        loss_val = float(loss.item())
+        if loss_val < best_loss:
+            best_loss = loss_val
+            best_state = {
+                'phase_mask': im_model.phase_mask.detach().clone(),
+                'g_sigma': im_model.g_sigma.detach().clone(),
+                'd_raw': im_model.d_raw.detach().clone(),
+                'nfp_offset_raw': im_model.nfp_offset_raw.detach().clone(),
+            }
+
         if epoch == 0:
             print("d_um:", im_model.d_um().detach().item())
             print("grad(d_raw):", None if im_model.d_raw.grad is None else im_model.d_raw.grad.detach().item())
@@ -638,6 +658,17 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
             f"debug_png_dump={im_model.debug_save_time_s:.1f}s ({100*im_model.debug_save_time_s/_total_time_s:.1f}%)  "
             f"live_panel={live_panel_time_s:.1f}s ({100*live_panel_time_s/_total_time_s:.1f}%)"
         )
+
+    # Restore the best-loss main-loop state (if any main-loop epoch ran) so everything saved
+    # below — d, g_sigma, phase_mask, the fitted NFP offset, and the exported sim stacks — comes
+    # from the lowest-loss point found, not just wherever the last epoch happened to land.
+    if best_state is not None:
+        with torch.no_grad():
+            im_model.phase_mask.copy_(best_state['phase_mask'])
+            im_model.g_sigma.copy_(best_state['g_sigma'])
+            im_model.d_raw.copy_(best_state['d_raw'])
+            im_model.nfp_offset_raw.copy_(best_state['nfp_offset_raw'])
+        print(f"[PR] restoring best-loss state (loss={best_loss:.6g}) for final outputs")
 
     # save final values back
     param_dict['mask_offset_in_um'] = float(im_model.d_um().detach().cpu().item())
