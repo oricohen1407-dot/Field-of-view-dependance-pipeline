@@ -5,9 +5,11 @@ import math
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
@@ -30,8 +32,20 @@ MICROSCOPES_PATH = str(PROJECT_DIR / "config" / "microscopes.json")
 # (that lands in the OS temp dir, e.g. AppData\Local\Temp\gradio\<hash>\..., which isn't a
 # sensible permanent home for real output data).
 CALIBRATION_EMITTERS_DIR = PROJECT_DIR / "calibration_setup_emitters"
+# phase_retrieval() (app_utils.py) hardcodes this exact path for its per-bead exp/sim outputs —
+# not configurable via pr_dict/param_dict, so this constant must track that literal default.
+RESULTS_DIR = PROJECT_DIR / "phase_retrieval_outputs"
 
 MICROSCOPE_FIELDS = ["M", "NA", "n_immersion", "f_4f", "ps_camera", "ps_BFP", "n_sample", "bitdepth"]
+
+
+def _make_emitters_out_dir(raw_stem: str) -> str:
+    """A fresh, uniquely-timestamped Calibration Setup output folder — one per upload/Restart
+    All, never reused — so separate picking sessions on the same raw file (or a restart within
+    one) never pile near-duplicate crops (e.g. the same emitter re-picked a pixel or two off)
+    into a shared folder."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(CALIBRATION_EMITTERS_DIR / f"{raw_stem}_{timestamp}_emitters")
 
 CRITICAL_CSS = """
 .critical-config {
@@ -331,6 +345,74 @@ def _multi_slice_strip(crop: np.ndarray, vmin: float, vmax: float, max_slices: i
     return np.concatenate(panels, axis=1)
 
 
+# ── Per-emitter results viewer (reads phase_retrieval()'s existing saved outputs — no
+# training-loop changes needed, this is purely reading files it already writes) ──────────────
+
+_RESULT_STACK_RE = re.compile(r"^exp_stack_(\d+)_(.+)\.tif$")
+
+
+def _discover_run_beads(results_dir: Path, expected_names: set | None = None) -> list:
+    """List every bead with a completed exp+sim stack pair in results_dir, sorted by its
+    training-time index (cnt=0 is always the on-axis bead, matching phase_retrieval()'s own
+    stacks-list order). phase_retrieval() never clears results_dir between runs — it accumulates
+    output from every run ever made — so without expected_names this would list stale beads
+    from unrelated past runs (old data, old crops) right alongside the current run's. Pass the
+    current run's actual bead names (see _expected_bead_names) to filter those out."""
+    if not results_dir.is_dir():
+        return []
+    beads = []
+    for exp_path in results_dir.glob("exp_stack_*.tif"):
+        m = _RESULT_STACK_RE.match(exp_path.name)
+        if not m:
+            continue
+        cnt, name = int(m.group(1)), m.group(2)
+        if expected_names is not None and name not in expected_names:
+            continue
+        sim_path = results_dir / f"sim_stack_{cnt}_{name}.tif"
+        if sim_path.is_file():
+            beads.append({"cnt": cnt, "name": name, "exp_path": str(exp_path), "sim_path": str(sim_path)})
+    beads.sort(key=lambda b: b["cnt"])
+    return beads
+
+
+def _expected_bead_names(cfg: Config) -> set:
+    """Bead names phase_retrieval() actually produces for this run's config — the exact same
+    os.path.splitext(basename)[0] transform it applies when building each bead's 'name'."""
+    names = {Path(cfg.user.zstack_file).stem}
+    names.update(Path(f).stem for f in cfg.user.offaxis_zstack_files)
+    return names
+
+
+def _render_bead_comparison(exp_path: str, sim_path: str, max_slices: int = 7) -> np.ndarray:
+    """Two-row grid — calculated (top) vs experimental (bottom), matching the live debug
+    panel's row order (_build_live_figure) — of up to max_slices evenly-spaced Z-slices from
+    this bead's saved result stacks. Those stacks are already per-slice-max-normalized uint16
+    (by phase_retrieval()'s own _to_u16), so this only needs a 16-to-8-bit rescale for display,
+    not the vmin/vmax handling raw crops need."""
+    exp = tifffile.imread(exp_path)
+    sim = tifffile.imread(sim_path)
+    Z = min(exp.shape[0], sim.shape[0])
+    n = min(max_slices, Z)
+    idxs = np.linspace(0, Z - 1, n).round().astype(int)
+
+    def _row(stack: np.ndarray) -> np.ndarray:
+        panels = []
+        for i, zi in enumerate(idxs):
+            gray = (stack[zi].astype(np.float32) / 257.0).clip(0, 255).astype(np.uint8)
+            panels.append(np.stack([gray, gray, gray], axis=-1))
+            if i < n - 1:
+                H = panels[-1].shape[0]
+                sep = np.empty((H, _STRIP_SEPARATOR_WIDTH, 3), dtype=np.uint8)
+                sep[:] = _STRIP_SEPARATOR_COLOR
+                panels.append(sep)
+        return np.concatenate(panels, axis=1)
+
+    exp_row, sim_row = _row(exp), _row(sim)
+    row_sep = np.empty((_STRIP_SEPARATOR_WIDTH, exp_row.shape[1], 3), dtype=np.uint8)
+    row_sep[:] = _STRIP_SEPARATOR_COLOR
+    return np.concatenate([sim_row, row_sep, exp_row], axis=0)
+
+
 # ── Config ↔ field helpers ────────────────────────────────────────────────────
 
 def _opt_float(v):
@@ -610,9 +692,8 @@ def build_demo() -> gr.Blocks:
                 with gr.Group():
                     gr.Markdown("### Other settings")
                     u_zrange   = gr.Textbox(label='zrange ("min, max" µm, display only)', value=defaults[9])
-                    u_project_dir = gr.Textbox(
-                        label="Project root dir (auto-filled by Browse above — points at a "
-                              "temp upload copy; edit manually if needed)",
+                    u_calib_root_dir = gr.Textbox(
+                        label="Calibration root dir",
                         value=defaults[10],
                     )
                     u_ext_mask = gr.Textbox(
@@ -677,12 +758,33 @@ def build_demo() -> gr.Blocks:
                 live_plot = gr.Plot(show_label=False)
                 log_out = gr.Textbox(label="Output Log", lines=20, interactive=False)
 
+                gr.Markdown(
+                    "### Per-emitter results (populated once the run finishes)\n"
+                    "Click an emitter on the raw image (if you used Calibration Setup), or "
+                    "just pick one from the dropdown."
+                )
+                results_beads_state = gr.State([])
+                with gr.Row(equal_height=True):
+                    results_image = gr.Image(
+                        label="Raw calibration data — click an emitter", interactive=False, visible=False,
+                    )
+                    with gr.Column():
+                        results_dropdown = gr.Dropdown(label="Pick an emitter", choices=[])
+                        results_status = gr.Textbox(
+                            show_label=False, interactive=False,
+                            placeholder="Run status / selected emitter appears here",
+                        )
+                results_plot = gr.Image(
+                    label="Calculated (top row) vs Experimental (bottom row) — Z-slices left→right",
+                    interactive=False,
+                )
+
         # component list — order MUST match config_to_fields / fields_to_config
         all_fields = [
             m_M, m_NA, m_n_imm, u_lamda, m_n_sample,
             m_f4f, m_ps_cam, m_ps_BFP,
             u_nfp_range, u_zrange,
-            u_project_dir,
+            u_calib_root_dir,
             u_zstack, u_central, u_offax_files, u_offax_coord, u_ext_mask,
             a_epochs, a_lr, a_loss, a_r_bead,
             a_betas, a_lr_phase, a_lr_sigma, a_lr_d,
@@ -797,13 +899,16 @@ def build_demo() -> gr.Blocks:
                         f"[ERROR] Expected a 2D or 3D TIFF, got shape {arr.shape}.", *cleared_fields, *unlock)
             Z, H, W = arr.shape
             vmin, vmax = float(arr.min()), float(arr.max())
-            # Use the ORIGINAL filename (Gradio preserves it) but save under our own dedicated
-            # folder, not next to Gradio's temp upload copy of the raw file.
+            # Use the ORIGINAL filename (Gradio preserves it) but save under our own dedicated,
+            # freshly-timestamped folder — not next to Gradio's temp upload copy of the raw
+            # file, and not reused across sessions (avoids piling up near-duplicate crops, e.g.
+            # the same emitter re-picked a pixel or two off, across separate times this same raw
+            # file gets browsed).
             raw_stem = Path(str(file_path)).stem
-            out_dir = str(CALIBRATION_EMITTERS_DIR / f"{raw_stem}_emitters")
+            out_dir = _make_emitters_out_dir(raw_stem)
             stack_state = {
                 "array": arr, "vmin": vmin, "vmax": vmax, "out_dir": out_dir,
-                "H": H, "W": W, "Z": Z,
+                "H": H, "W": W, "Z": Z, "raw_stem": raw_stem,
             }
             mid_z = Z // 2
             z_last = max(Z - 1, 0)
@@ -961,12 +1066,19 @@ def build_demo() -> gr.Blocks:
             return None, marked, None, "Cleared — click a new emitter location."
 
         def on_restart_all(stack_state, z):
-            """Wipe every confirmed emitter for the current raw file and unlock crop size +
-            Z-range so the user can start over, without needing to re-browse the file."""
+            """Wipe every confirmed emitter for the current raw file, unlock crop size +
+            Z-range, and empty out this session's own output folder on disk — deletes it
+            (recreated fresh by the next Confirm's os.makedirs) rather than spawning yet another
+            timestamped folder, so repeated restarts on one raw file don't leave a trail of
+            near-empty folders behind. Safe to rmtree here: out_dir is this session's own
+            uniquely-timestamped subfolder, never the shared CALIBRATION_EMITTERS_DIR constant."""
             if not stack_state:
                 return (gr.skip(),) * 8 + ("Nothing to restart — no file loaded.",) + (gr.skip(),) * 8
             Z = stack_state["Z"]
             z_last = max(Z - 1, 0)
+            out_dir = stack_state["out_dir"]
+            if os.path.isdir(out_dir):
+                shutil.rmtree(out_dir)
             marked = _render_raw_frame(stack_state, z, [])
             cleared_fields = ("", "", "[]", "", "[]")
             reset_locks = (
@@ -974,7 +1086,8 @@ def build_demo() -> gr.Blocks:
             )
             return (
                 [], None, 0, z_last, _range_display_text(0, z_last, Z), marked, None,
-                "Click the **on-axis (central)** emitter.", "Restarted — all emitters cleared.",
+                "Click the **on-axis (central)** emitter.",
+                "Restarted — all emitters cleared and this session's output folder emptied.",
                 *cleared_fields, *reset_locks,
             )
 
@@ -998,6 +1111,43 @@ def build_demo() -> gr.Blocks:
             _save_microscopes(data)
             return gr.update(choices=list(data.keys()), value=name), f"Saved microscope '{name}'."
 
+        # ── Per-emitter results viewer handlers ─────────────────────────────────
+
+        def _find_emitter_by_name(emitters, name):
+            return next((e for e in emitters if Path(e["filename"]).stem == name), None)
+
+        def on_results_bead_select(bead_name, beads, stack_state, emitters):
+            bead = next((b for b in beads if b["name"] == bead_name), None)
+            if bead is None:
+                return gr.skip(), None, "Pick an emitter to view its results."
+            img = _render_bead_comparison(bead["exp_path"], bead["sim_path"])
+            status = f"Showing '{bead_name}' — calculated (top) vs experimental (bottom)."
+            if not stack_state or not emitters:
+                return gr.skip(), img, status
+            selected = _find_emitter_by_name(emitters, bead_name)
+            marked = _render_raw_frame(stack_state, stack_state["Z"] // 2, emitters, selected)
+            return marked, img, status
+
+        def on_results_image_click(evt: gr.SelectData, emitters, beads, stack_state):
+            if not emitters or not stack_state:
+                return gr.skip(), gr.skip(), gr.skip(), gr.skip()
+            col, row = int(evt.index[0]), int(evt.index[1])
+            # require the click to actually land inside an emitter's own crop box — clicking
+            # empty background shouldn't silently jump to "nearest" bead.
+            hits = [e for e in emitters
+                    if e["bbox"][0] <= row < e["bbox"][1] and e["bbox"][2] <= col < e["bbox"][3]]
+            if not hits:
+                return gr.skip(), gr.skip(), gr.skip(), "Click inside an emitter's box to select it."
+            closest = min(hits, key=lambda e: (e["row"] - row) ** 2 + (e["col"] - col) ** 2)
+            name = Path(closest["filename"]).stem
+            bead = next((b for b in beads if b["name"] == name), None)
+            if bead is None:
+                return gr.update(value=None), gr.skip(), None, f"'{name}' wasn't part of this run's results."
+            img = _render_bead_comparison(bead["exp_path"], bead["sim_path"])
+            marked = _render_raw_frame(stack_state, stack_state["Z"] // 2, emitters, closest)
+            return (gr.update(value=name), marked, img,
+                    f"Showing '{name}' — calculated (top) vs experimental (bottom).")
+
         def stop_handler():
             if _run_state["stop_event"] is not None:
                 _run_state["stop_event"].set()
@@ -1008,15 +1158,19 @@ def build_demo() -> gr.Blocks:
                 )
             return gr.update(value="⏳ Stopping…", interactive=False)
 
-        def run_handler(*vals):
+        def run_handler(raw_stack_state, emitters_state_val, *vals):
+            # results_beads_state, results_dropdown, results_image, results_plot, results_status
+            no_results_change = (gr.skip(),) * 5
             if _run_state["busy"]:
-                yield "[ERROR] A run is already in progress.", gr.skip(), gr.update(interactive=False), gr.update(interactive=True)
+                yield ("[ERROR] A run is already in progress.", gr.skip(),
+                       gr.update(interactive=False), gr.update(interactive=True), *no_results_change)
                 return
 
             try:
                 cfg = fields_to_config(*vals)
             except Exception as exc:
-                yield f"[CONFIG ERROR] {exc}", gr.skip(), gr.update(interactive=True), gr.update(interactive=False)
+                yield (f"[CONFIG ERROR] {exc}", gr.skip(),
+                       gr.update(interactive=True), gr.update(interactive=False), *no_results_change)
                 return
 
             q: queue.SimpleQueue = queue.SimpleQueue()
@@ -1062,7 +1216,7 @@ def build_demo() -> gr.Blocks:
                 # once Stop has been clicked, stop_handler already set the "Stopping…" label —
                 # keep the button disabled (don't touch its value) instead of re-enabling it
                 stop_btn_update = gr.skip() if stop_event.is_set() else gr.update(interactive=True)
-                yield log, plot_update, gr.update(interactive=False), stop_btn_update
+                yield log, plot_update, gr.update(interactive=False), stop_btn_update, *no_results_change
 
             while not q.empty():
                 log += q.get_nowait()
@@ -1075,13 +1229,49 @@ def build_demo() -> gr.Blocks:
 
             _run_state["stop_event"] = None
             log += "\n\n--- DONE ---" if run_error[0] is None else f"\n\n--- FAILED: {run_error[0]} ---"
-            yield log, plot_update, gr.update(interactive=True), gr.update(value="Stop", interactive=False)
+
+            # Populate the per-emitter results viewer from phase_retrieval()'s own saved
+            # outputs — only on a clean finish (full run or user Stop); on an exception, leave
+            # it untouched rather than showing possibly-stale results from an earlier run.
+            if run_error[0] is None:
+                beads = _discover_run_beads(RESULTS_DIR, _expected_bead_names(cfg))
+                bead_names = [b["name"] for b in beads]
+                default_bead = next((b for b in beads if b["cnt"] == 0), beads[0] if beads else None)
+                if default_bead is not None:
+                    results_plot_update = _render_bead_comparison(default_bead["exp_path"], default_bead["sim_path"])
+                    results_status_update = (
+                        f"Showing '{default_bead['name']}' — calculated (top) vs experimental (bottom)."
+                    )
+                    dropdown_update = gr.update(choices=bead_names, value=default_bead["name"])
+                else:
+                    results_plot_update = None
+                    results_status_update = "Run finished but no per-emitter result files were found."
+                    dropdown_update = gr.update(choices=[], value=None)
+
+                if emitters_state_val and raw_stack_state:
+                    selected = (
+                        _find_emitter_by_name(emitters_state_val, default_bead["name"])
+                        if default_bead is not None else None
+                    )
+                    marked = _render_raw_frame(
+                        raw_stack_state, raw_stack_state["Z"] // 2, emitters_state_val, selected
+                    )
+                    image_update = gr.update(value=marked, visible=True)
+                else:
+                    image_update = gr.update(visible=False)
+
+                results_outputs = (beads, dropdown_update, image_update, results_plot_update, results_status_update)
+            else:
+                results_outputs = no_results_change
+
+            yield (log, plot_update, gr.update(interactive=True),
+                   gr.update(value="Stop", interactive=False), *results_outputs)
 
         load_file.change(fn=load_handler, inputs=load_file, outputs=all_fields)
         save_btn.click(fn=save_handler, inputs=all_fields, outputs=save_status)
         folder_upload.upload(
             fn=scan_folder_handler, inputs=[folder_upload],
-            outputs=[u_project_dir, u_offax_files, onaxis_picker, u_offax_coord, scan_status],
+            outputs=[u_calib_root_dir, u_offax_files, onaxis_picker, u_offax_coord, scan_status],
         )
         move_onaxis_btn.click(
             fn=move_onaxis_handler, inputs=[onaxis_picker, u_offax_files, u_offax_coord],
@@ -1099,7 +1289,7 @@ def build_demo() -> gr.Blocks:
             outputs=[raw_stack_state, emitters_state, pending_crop_state,
                      z_slider, z_min_display, z_max_display, z_range_display,
                      raw_image, cropped_image, setup_instruction, setup_status,
-                     u_project_dir, u_zstack, u_central, u_offax_files, u_offax_coord,
+                     u_calib_root_dir, u_zstack, u_central, u_offax_files, u_offax_coord,
                      crop_size_input, set_min_btn, set_max_btn],
         )
         z_slider.change(
@@ -1134,7 +1324,7 @@ def build_demo() -> gr.Blocks:
                     u_offax_files, u_offax_coord],
             outputs=[emitters_state, pending_crop_state, raw_image, cropped_image,
                      setup_instruction, setup_status,
-                     u_project_dir, u_zstack, u_central, u_offax_files, u_offax_coord,
+                     u_calib_root_dir, u_zstack, u_central, u_offax_files, u_offax_coord,
                      crop_size_input, set_min_btn, set_max_btn],
         )
         clear_btn.click(
@@ -1146,13 +1336,27 @@ def build_demo() -> gr.Blocks:
             inputs=[raw_stack_state, z_slider],
             outputs=[emitters_state, pending_crop_state, z_min_display, z_max_display, z_range_display,
                      raw_image, cropped_image, setup_instruction, setup_status,
-                     u_project_dir, u_zstack, u_central, u_offax_files, u_offax_coord,
+                     u_calib_root_dir, u_zstack, u_central, u_offax_files, u_offax_coord,
                      crop_size_input, set_min_btn, set_max_btn],
         )
         m_dropdown.change(fn=microscope_load_handler, inputs=m_dropdown, outputs=microscope_fields)
         m_save_btn.click(fn=microscope_save_handler, inputs=[m_name] + microscope_fields, outputs=[m_dropdown, m_status])
-        run_btn.click(fn=run_handler, inputs=all_fields, outputs=[log_out, live_plot, run_btn, stop_btn])
+        run_btn.click(
+            fn=run_handler, inputs=[raw_stack_state, emitters_state] + all_fields,
+            outputs=[log_out, live_plot, run_btn, stop_btn,
+                     results_beads_state, results_dropdown, results_image, results_plot, results_status],
+        )
         stop_btn.click(fn=stop_handler, outputs=stop_btn)
+        results_dropdown.change(
+            fn=on_results_bead_select,
+            inputs=[results_dropdown, results_beads_state, raw_stack_state, emitters_state],
+            outputs=[results_image, results_plot, results_status],
+        )
+        results_image.select(
+            fn=on_results_image_click,
+            inputs=[emitters_state, results_beads_state, raw_stack_state],
+            outputs=[results_dropdown, results_image, results_plot, results_status],
+        )
 
     demo.queue()
     return demo
