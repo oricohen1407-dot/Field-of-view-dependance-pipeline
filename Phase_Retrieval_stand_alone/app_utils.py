@@ -1,7 +1,9 @@
 import os
 import csv
+import json
 import math
 import time
+import pickle
 import torch
 import numpy as np
 import tifffile
@@ -11,7 +13,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from image_model import ImModel_pr
-from DS3Dplus.ds3d_utils import ImModel
+from DS3Dplus.ds3d_utils import ImModel, ImModelTraining, Sampling
 
 def _load_zstack_with_count(path: str):
     """Z (slice count) is authoritative from the file itself — these TIFFs carry no
@@ -700,6 +702,14 @@ def phase_retrieval(param_dict, pr_dict, fig_flag=True):
         f.write(f"mask_offset_in_um (d) = {float(param_dict['mask_offset_in_um'])}\n")
         f.write(f"nfp_offset_um = {param_dict['nfp_offset_um']}\n")
         f.write(f"nfp_range_um = {param_dict['nfp_range_um']}\n")
+    with open(os.path.join(save_dir, "results.json"), "w") as f:
+        json.dump({
+            "phase_mask_path": "phase_mask.npy",
+            "g_sigma": float(g_sigma),
+            "d_um": float(param_dict['mask_offset_in_um']),
+            "nfp_offset_um": float(param_dict['nfp_offset_um']),
+            "nfp_range_um": float(param_dict['nfp_range_um']),
+        }, f, indent=2)
 
     # helper: float stack -> uint16 for viewing
     def _to_u16(st):
@@ -1009,3 +1019,141 @@ def fit_mask_offset_from_offaxis_stacks(
             io.imsave(os.path.join(save_dir, f"comparison_montage_{st['name']}.tif"), montage, check_contrast=False)
 
     return best_d2
+
+
+# ============================================================
+# Generate Training Data
+# ============================================================
+
+def load_phase_retrieval_results(results_dir: str):
+    """Loads the fitted PSF parameters written by phase_retrieval() (results.json +
+    phase_mask.npy). Returns None (not an exception) if a Phase Retrieval run hasn't produced
+    them yet in this directory."""
+    results_path = os.path.join(results_dir, "results.json")
+    if not os.path.isfile(results_path):
+        return None
+    with open(results_path) as f:
+        results = json.load(f)
+    mask_path = os.path.join(results_dir, results["phase_mask_path"])
+    if not os.path.isfile(mask_path):
+        return None
+    return {
+        "phase_mask": np.load(mask_path),
+        "g_sigma": float(results["g_sigma"]),
+        "d_um": float(results["d_um"]),
+        "nfp_offset_um": float(results["nfp_offset_um"]),
+        "nfp_range_um": float(results["nfp_range_um"]),
+    }
+
+
+def noise_patch_stats(frame: np.ndarray, bbox):
+    """Mean/std of pixel values inside a user-marked no-emitter rectangle, bbox=(r0, r1, c0, c1)."""
+    r0, r1, c0, c1 = bbox
+    patch = frame[r0:r1, c0:c1]
+    return float(patch.mean()), float(patch.std())
+
+
+def _simulate_one_frame(model, sampling, param_dict):
+    """One simulated training frame: random emitters -> pasted clean PSF patches -> Poisson
+    shot noise + dark offset -> bit-depth clip. Ported from the root pipeline's
+    training_data_func, but sized from each patch's own returned shape rather than model.N (the
+    optics-derived internal simulation grid, which can differ from the requested (H, W))."""
+    xyzps, xyz_ids, blob3d = sampling.xyzp_batch()
+    H, W = param_dict['H'], param_dict['W']
+    ps_xy = param_dict['ps_camera'] / param_dict['M']
+    canvas = np.zeros((H, W), dtype=np.float32)
+
+    for k in range(xyzps.shape[0]):
+        x_um, y_um = xyzps[k, 0], xyzps[k, 1]
+        c = int(round(x_um / ps_xy + (W - 1) / 2))
+        r = int(round(y_um / ps_xy + (H - 1) / 2))
+        patch = model.psf_patch_clean(xyzps[k].astype(np.float32))
+        pr, pc = patch.shape[0] // 2, patch.shape[1] // 2
+        rr0, rr1 = max(0, r - pr), min(H, r + pr + 1)
+        cc0, cc1 = max(0, c - pc), min(W, c + pc + 1)
+        if rr0 >= rr1 or cc0 >= cc1:
+            continue
+        pr0, pc0 = rr0 - (r - pr), cc0 - (c - pc)
+        canvas[rr0:rr1, cc0:cc1] += patch[pr0:pr0 + (rr1 - rr0), pc0:pc0 + (cc1 - cc0)]
+
+    bg_lo, bg_hi = param_dict['shot_noise_background_range']
+    off_lo, off_hi = param_dict['noise_offset_range']
+    background = float(np.random.uniform(bg_lo, bg_hi)) ** 2
+    offset = float(np.random.uniform(off_lo, off_hi))
+    im = np.abs(np.random.poisson(canvas + background) + offset - background)
+    im = np.clip(im, 0, 2 ** param_dict['bitdepth'] - 1).astype(np.uint16)
+    return im, xyz_ids, blob3d
+
+
+def generate_training_frame(param_dict: dict) -> np.ndarray:
+    """Renders a single sample simulated training frame, for the GUI's live preview."""
+    model = ImModelTraining(param_dict)
+    sampling = Sampling(param_dict)
+    im, _, _ = _simulate_one_frame(model, sampling, param_dict)
+    return im
+
+
+def generate_training_data(param_dict: dict, out_dir: str, n_ims: int, stop_event=None) -> None:
+    """Generates n_ims simulated training frames + ground truth into out_dir/{x/, y.pickle,
+    param.pickle}, mirroring the root pipeline's training_data_func output format. Unlike root
+    (which unconditionally deletes out_dir first), this never deletes a pre-existing folder --
+    an interactive GUI where the user can type an arbitrary path must not silently wipe it.
+    A rerun into a non-empty out_dir continues frame numbering after the highest existing
+    index and merges into the existing y.pickle, rather than restarting at 0 and silently
+    overwriting/orphaning earlier frames and their labels."""
+    x_dir = os.path.join(out_dir, "x")
+    os.makedirs(x_dir, exist_ok=True)
+    y_pickle_path = os.path.join(out_dir, "y.pickle")
+
+    existing_indices = [
+        int(os.path.splitext(f)[0]) for f in os.listdir(x_dir)
+        if os.path.splitext(f)[1].lower() in ('.tif', '.tiff') and os.path.splitext(f)[0].isdigit()
+    ]
+    start_i = max(existing_indices) + 1 if existing_indices else 0
+
+    if existing_indices and os.path.isfile(y_pickle_path):
+        with open(y_pickle_path, "rb") as f:
+            labels_dict = pickle.load(f)
+        print(f"[TD] {x_dir} already has {len(existing_indices)} frame(s) -- "
+              f"appending new frames starting at {start_i:05d}.tif.")
+    elif existing_indices:
+        labels_dict = {}
+        print(f"[TD] WARNING: {x_dir} has {len(existing_indices)} existing frame(s) but no "
+              f"y.pickle was found -- their ground truth is not recoverable. New frames will "
+              f"still be appended starting at {start_i:05d}.tif with their own labels.")
+    else:
+        labels_dict = {}
+
+    model = ImModelTraining(param_dict)
+    sampling = Sampling(param_dict)
+    H, W = param_dict['H'], param_dict['W']
+
+    labels_dict.update({
+        'volume_size': (param_dict['D'], param_dict['HH'], param_dict['WW']),
+        'us_factor': param_dict['us_factor'],
+        'blob_r': param_dict['blob_r'],
+        'blob_maxv': param_dict['blob_maxv'],
+        'tile_grid': (1, 1),
+        'camera_size_px': (H, W),
+    })
+
+    n_ims = int(n_ims)
+    written = 0
+    for k in range(n_ims):
+        if stop_event is not None and stop_event.is_set():
+            print(f"[TD] stopped at frame {k}/{n_ims}")
+            break
+        im, xyz_ids, blob3d = _simulate_one_frame(model, sampling, param_dict)
+        fname = f"{start_i + k:05d}.tif"
+        io.imsave(os.path.join(x_dir, fname), im, check_contrast=False)
+        labels_dict[fname] = (xyz_ids, blob3d)
+        written += 1
+        if k % 100 == 0:
+            print(f"[TD] training image [{k} / {n_ims}]")
+
+    with open(y_pickle_path, "wb") as f:
+        pickle.dump(labels_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+    with open(os.path.join(out_dir, "param.pickle"), "wb") as f:
+        pickle.dump(param_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"[TD] done. wrote {written} frames to {out_dir} "
+          f"(index {start_i:05d}-{start_i + max(written, 1) - 1:05d}).")

@@ -88,9 +88,28 @@ class AdvancedConfig:
 
 
 @dataclass
+class TrainingDataConfig:
+    # --- Primary (adjust in the "Generate Training Data" tab, then Update Preview) ---
+    signal_range: str = "500, 3000"        # Nsig_range (photons/emitter)
+    background_range: str = "80, 150"      # background level (counts); sqrt'd into shot_noise_background_range
+    density_range: str = "1, 10"           # num_particles_range (emitters/frame)
+    zrange_um: str = ""                    # "" => inherit UserConfig.zrange at generation time
+
+    # --- Secondary / advanced ---
+    canvas_size_px: int = 121              # H = W of generated frames
+    num_z_voxel: int = 21                  # D
+    us_factor: int = 1
+    blob_r: int = 3
+    blob_sigma: float = 0.65
+    blob_maxv: int = 5000
+    noise_offset_range: str = "0, 0"       # additive dark/readout offset
+
+
+@dataclass
 class Config:
     user: UserConfig = field(default_factory=UserConfig)
     advanced: AdvancedConfig = field(default_factory=AdvancedConfig)
+    training: TrainingDataConfig = field(default_factory=TrainingDataConfig)
 
     def generate_param_dict(self) -> dict:
         """
@@ -128,6 +147,56 @@ class Config:
                                   else len(u.offaxis_coords_pixel) + 1,
         }
 
+    def generate_training_param_dict(self, pr_results: dict) -> dict:
+        """
+        Parameters consumed by Sampling and ImModelTraining (DS3Dplus/ds3d_utils.py) to
+        generate simulated training frames using the phase-retrieval-fitted PSF.
+        `pr_results` is the dict returned by app_utils.load_phase_retrieval_results().
+        """
+        from DS3Dplus.ds3d_utils import select_device
+
+        u, t = self.user, self.training
+        H = W = int(t.canvas_size_px)
+        D = int(t.num_z_voxel)
+        us = int(t.us_factor)
+        if us < 1:
+            raise ValueError(f"Up-sampling factor must be >= 1 (got {us}).")
+        psf_half_size_px = 20  # margin (px) kept clear of the canvas edge for pasted PSF patches
+        if H <= 2 * psf_half_size_px:
+            raise ValueError(
+                f"Training-frame canvas size ({H}px) must be greater than "
+                f"{2 * psf_half_size_px}px (2x the PSF-patch edge margin)."
+            )
+        zrange_source = t.zrange_um if t.zrange_um.strip() else u.zrange
+        zmin, zmax = (float(x) for x in zrange_source.split(','))
+        ps_xy = u.ps_camera / u.M
+        bg_lo, bg_hi = (float(x) for x in t.background_range.split(','))
+        g_sigma_fitted = pr_results['g_sigma']
+
+        return {
+            'device': select_device(),
+            'M': u.M, 'NA': u.NA, 'n_immersion': u.n_immersion, 'lamda': u.lamda,
+            'n_sample': u.n_sample, 'f_4f': u.f_4f, 'ps_camera': u.ps_camera, 'ps_BFP': u.ps_BFP,
+            'NFP': pr_results['nfp_offset_um'],
+            'H': H, 'W': W,
+            'phase_mask': pr_results['phase_mask'],
+            'g_sigma': (g_sigma_fitted, g_sigma_fitted),
+            'mask_offset_in_um': pr_results['d_um'],
+            'centralBeadCoordinates_pixel': [H / 2, W / 2],
+            'bitdepth': self.advanced.bitdepth,
+            'baseline': self.advanced.baseline, 'read_std': self.advanced.read_std,
+            'non_uniform_noise_flag': self.advanced.non_uniform_noise_flag,
+            'D': D, 'us_factor': us,
+            'HH': int(H * us), 'WW': int(W * us),
+            'buffer_HH': int(psf_half_size_px * us), 'buffer_WW': int(psf_half_size_px * us),
+            'vs_xy': ps_xy / us, 'vs_z': (zmax - zmin) / D, 'zrange': (zmin, zmax),
+            'Nsig_range': tuple(float(x) for x in t.signal_range.split(',')),
+            'num_particles_range': [int(float(x)) for x in t.density_range.split(',')],
+            'blob_r': t.blob_r, 'blob_sigma': t.blob_sigma, 'blob_maxv': t.blob_maxv,
+            'shot_noise_background_range': (bg_lo ** 0.5, bg_hi ** 0.5),
+            'noise_offset_range': tuple(float(x) for x in t.noise_offset_range.split(',')),
+        }
+
     def generate_pr_dict(self) -> dict:
         """
         Phase retrieval training configuration consumed only by phase_retrieval().
@@ -162,11 +231,14 @@ class Config:
     def from_dict(cls, d: dict) -> Config:
         user_fields = {f.name for f in dataclass_fields(UserConfig) if f.init}
         adv_fields = {f.name for f in dataclass_fields(AdvancedConfig) if f.init}
+        training_fields = {f.name for f in dataclass_fields(TrainingDataConfig) if f.init}
         user_kwargs = {k: v for k, v in d['user'].items() if k in user_fields}
         adv_kwargs = {k: v for k, v in d['advanced'].items() if k in adv_fields}
+        training_kwargs = {k: v for k, v in d.get('training', {}).items() if k in training_fields}
         return cls(
             user=UserConfig(**user_kwargs),
             advanced=AdvancedConfig(**adv_kwargs),
+            training=TrainingDataConfig(**training_kwargs),
         )
 
     def save(self, path: str):

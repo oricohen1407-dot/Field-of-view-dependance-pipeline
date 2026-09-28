@@ -18,12 +18,13 @@ import tifffile
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-from config.config import Config, UserConfig, AdvancedConfig
+from config.config import Config, UserConfig, AdvancedConfig, TrainingDataConfig
 from config.emitter_centers import (
     PROJECT_DIR as DATA_ROOT_DIR, ZSTACK_FILES_PATH,
     ZSTACK_FILE, CENTRAL_BEAD_COORDINATES_PIXEL, OFFAXIS_ZSTACK_FILES, OFFAXIS_COORDS_PIXEL,
 )
 from func_utils import characterize_PSF
+import app_utils
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_SAVE_PATH = str(PROJECT_DIR / "config" / "config.json")
@@ -267,6 +268,16 @@ def _crop_window(row: int, col: int, size: int, H: int, W: int):
     return r0, r0 + size_h, c0, c0 + size_w
 
 
+def _crop_window_rect(row: int, col: int, w: int, h: int, H: int, W: int):
+    """Same idea as _crop_window but with independent width/height, for a plain rectangle mark
+    (used by the Generate Training Data tab's noise-patch picker, which has no reason to be
+    square)."""
+    h, w = min(h, H), min(w, W)
+    r0 = max(0, min(row - h // 2, H - h))
+    c0 = max(0, min(col - w // 2, W - w))
+    return r0, r0 + h, c0, c0 + w
+
+
 def _read_tiff_with_retry(path: str, attempts: int = 8, base_delay: float = 0.25) -> np.ndarray:
     """tifffile.imread with retry-on-PermissionError. On Windows a just-uploaded large file can
     stay briefly locked (antivirus scanning it, or the upload's own write handle not released
@@ -429,8 +440,14 @@ def _opt_str(v):
 
 
 def config_to_fields(cfg: Config) -> list:
-    """Flatten a Config into the ordered list of Gradio field values (47 items)."""
-    u, a = cfg.user, cfg.advanced
+    """Flatten a Config into the ordered list of Gradio field values (63 items)."""
+    u, a, t = cfg.user, cfg.advanced, cfg.training
+    sig_lo, sig_hi = (float(x) for x in t.signal_range.split(','))
+    bg_lo, bg_hi = (float(x) for x in t.background_range.split(','))
+    dens_lo, dens_hi = (float(x) for x in t.density_range.split(','))
+    z_source = t.zrange_um if t.zrange_um.strip() else u.zrange
+    z_lo, z_hi = (float(x) for x in z_source.split(','))
+    noff_lo, noff_hi = (float(x) for x in t.noise_offset_range.split(','))
     return [
         # ── Microscope preset fields, part 1 (7 of 8 — bitdepth is with AdvancedConfig below) ──
         u.M, u.NA, u.n_immersion, u.lamda, u.n_sample,
@@ -466,6 +483,15 @@ def config_to_fields(cfg: Config) -> list:
         a.nfp_offset_min_um,
         a.nfp_offset_max_um,
         a.mask_warmup_epochs,
+        # ── Training-data generation (Generate Training Data tab) — appended, keeps every index above stable ──
+        sig_lo, sig_hi,
+        bg_lo, bg_hi,
+        dens_lo, dens_hi,
+        z_lo, z_hi,
+        t.canvas_size_px,
+        t.num_z_voxel, t.us_factor,
+        t.blob_r, t.blob_sigma, t.blob_maxv,
+        noff_lo, noff_hi,
     ]
 
 
@@ -493,6 +519,15 @@ def fields_to_config(
     debug_bfp, debug_every_num_epoch, debug_max_emitters,
     lr_nfp_mult, nfp_offset_init_um, nfp_offset_min_um, nfp_offset_max_um,
     mask_warmup_epochs,
+    # Training-data generation (16)
+    td_sig_min, td_sig_max,
+    td_bg_min, td_bg_max,
+    td_density_min, td_density_max,
+    td_zmin, td_zmax,
+    td_canvas_size,
+    td_num_z_voxel, td_us_factor,
+    td_blob_r, td_blob_sigma, td_blob_maxv,
+    td_noise_off_min, td_noise_off_max,
 ) -> Config:
     """Parse ordered Gradio field values back into a Config object."""
     offaxis_files = [
@@ -545,6 +580,19 @@ def fields_to_config(
             nfp_offset_min_um=float(nfp_offset_min_um),
             nfp_offset_max_um=float(nfp_offset_max_um),
             mask_warmup_epochs=int(float(mask_warmup_epochs)),
+        ),
+        training=TrainingDataConfig(
+            signal_range=f"{float(td_sig_min)}, {float(td_sig_max)}",
+            background_range=f"{float(td_bg_min)}, {float(td_bg_max)}",
+            density_range=f"{int(float(td_density_min))}, {int(float(td_density_max))}",
+            zrange_um=f"{float(td_zmin)}, {float(td_zmax)}",
+            canvas_size_px=int(float(td_canvas_size)),
+            num_z_voxel=int(float(td_num_z_voxel)),
+            us_factor=int(float(td_us_factor)),
+            blob_r=int(float(td_blob_r)),
+            blob_sigma=float(td_blob_sigma),
+            blob_maxv=int(float(td_blob_maxv)),
+            noise_offset_range=f"{float(td_noise_off_min)}, {float(td_noise_off_max)}",
         ),
     )
 
@@ -779,6 +827,75 @@ def build_demo() -> gr.Blocks:
                     interactive=False,
                 )
 
+            with gr.Tab("Generate Training Data"):
+                gr.Markdown(
+                    "### 1. Load fitted PSF parameters from Phase Retrieval\n"
+                    "Run Phase Retrieval first (Configure + Run tabs), then load its results here."
+                )
+                with gr.Row(equal_height=True):
+                    td_load_pr_btn = gr.Button("Load Phase Retrieval Results")
+                    td_pr_status = gr.Textbox(
+                        show_label=False, interactive=False,
+                        placeholder="Click to load the latest fitted d / g_sigma / NFP offset / phase mask.",
+                    )
+                td_pr_results_state = gr.State(None)
+
+                gr.Markdown("### 2. Upload an experimental frame and mark a no-emitter region")
+                with gr.Row(equal_height=True):
+                    td_frame_upload = gr.File(label="Experimental frame (.tif)", file_count="single")
+                    with gr.Column():
+                        td_noise_w = gr.Number(label="Noise-patch width (px)", value=40, precision=0)
+                        td_noise_h = gr.Number(label="Noise-patch height (px)", value=40, precision=0)
+                td_frame_state = gr.State(None)
+                td_noise_bbox_state = gr.State(None)
+                td_frame_image = gr.Image(label="Click to mark a no-emitter region", interactive=False)
+                td_noise_status = gr.Textbox(
+                    show_label=False, interactive=False,
+                    placeholder="Upload a frame, then click a no-emitter region to see its mean/std.",
+                )
+
+                gr.Markdown("### 3. Parameters — adjust, then Update Preview")
+                with gr.Row(equal_height=True):
+                    td_sig_min = gr.Number(label="Signal min (photons)", value=defaults[47])
+                    td_sig_max = gr.Number(label="Signal max (photons)", value=defaults[48])
+                with gr.Row(equal_height=True):
+                    td_bg_min = gr.Number(label="Background min (counts)", value=defaults[49])
+                    td_bg_max = gr.Number(label="Background max (counts)", value=defaults[50])
+                with gr.Row(equal_height=True):
+                    td_density_min = gr.Number(label="Emitters/frame min", value=defaults[51], precision=0)
+                    td_density_max = gr.Number(label="Emitters/frame max", value=defaults[52], precision=0)
+                with gr.Row(equal_height=True):
+                    td_zmin = gr.Number(label="Z min (µm)", value=defaults[53])
+                    td_zmax = gr.Number(label="Z max (µm)", value=defaults[54])
+                td_canvas_size = gr.Number(label="Training-frame canvas size (px)", value=defaults[55], precision=0)
+
+                with gr.Accordion("Advanced", open=False):
+                    with gr.Row(equal_height=True):
+                        td_num_z_voxel = gr.Number(label="Z voxels (D)", value=defaults[56], precision=0)
+                        td_us_factor = gr.Number(label="Up-sampling factor", value=defaults[57], precision=0)
+                    with gr.Row(equal_height=True):
+                        td_blob_r = gr.Number(label="Blob radius (voxels)", value=defaults[58], precision=0)
+                        td_blob_sigma = gr.Number(label="Blob sigma", value=defaults[59])
+                        td_blob_maxv = gr.Number(label="Blob max value", value=defaults[60])
+                    with gr.Row(equal_height=True):
+                        td_noise_off_min = gr.Number(label="Noise offset min", value=defaults[61])
+                        td_noise_off_max = gr.Number(label="Noise offset max", value=defaults[62])
+
+                td_update_preview_btn = gr.Button("Update Preview")
+                td_preview_plot = gr.Plot(show_label=False)
+                td_preview_status = gr.Textbox(
+                    show_label=False, interactive=False, placeholder="Preview status appears here.",
+                )
+
+                gr.Markdown("### 4. Simulate Training Data")
+                with gr.Row(equal_height=True):
+                    td_out_dir = gr.Textbox(label="Output folder", value=str(PROJECT_DIR / "training_data"))
+                    td_n_ims = gr.Number(label="Number of frames", value=10000, precision=0)
+                with gr.Row(equal_height=True):
+                    td_simulate_btn = gr.Button("Simulate Training Data", variant="primary")
+                    td_stop_btn = gr.Button("Stop", variant="stop", interactive=False)
+                td_log_out = gr.Textbox(label="Output Log", lines=15, interactive=False)
+
         # component list — order MUST match config_to_fields / fields_to_config
         all_fields = [
             m_M, m_NA, m_n_imm, u_lamda, m_n_sample,
@@ -796,6 +913,14 @@ def build_demo() -> gr.Blocks:
             a_dbg_bfp, a_dbg_ev, a_dbg_max,
             a_lr_nfp, a_nfp_offset_init, a_nfp_offset_min, a_nfp_offset_max,
             a_mask_warmup,
+            td_sig_min, td_sig_max,
+            td_bg_min, td_bg_max,
+            td_density_min, td_density_max,
+            td_zmin, td_zmax,
+            td_canvas_size,
+            td_num_z_voxel, td_us_factor,
+            td_blob_r, td_blob_sigma, td_blob_maxv,
+            td_noise_off_min, td_noise_off_max,
         ]
 
         # microscope preset fields, in the fixed order used by microscopes.json entries
@@ -805,6 +930,9 @@ def build_demo() -> gr.Blocks:
         # never persisted. "busy" is an explicit one-run-at-a-time guard, kept even though
         # demo.queue()'s default concurrency_limit=1 already serializes Run clicks process-wide.
         _run_state = {"stop_event": None, "busy": False}
+        # separate from _run_state above so the Run tab's PSF-characterization run and this
+        # tab's training-data generation run never share a stop button / busy flag.
+        _td_run_state = {"stop_event": None, "busy": False}
 
         # ── Handlers ─────────────────────────────────────────────────────────
 
@@ -1161,9 +1289,12 @@ def build_demo() -> gr.Blocks:
         def run_handler(raw_stack_state, emitters_state_val, *vals):
             # results_beads_state, results_dropdown, results_image, results_plot, results_status
             no_results_change = (gr.skip(),) * 5
-            if _run_state["busy"]:
-                yield ("[ERROR] A run is already in progress.", gr.skip(),
-                       gr.update(interactive=False), gr.update(interactive=True), *no_results_change)
+            # also blocks against a concurrent Generate Training Data run: both worker threads
+            # redirect the process-global sys.stdout, which corrupts each other's log streams
+            # (and each other's redirection) if they ever run at the same time.
+            if _run_state["busy"] or _td_run_state["busy"]:
+                yield ("[ERROR] Another run (Phase Retrieval or Generate Training Data) is already in progress.",
+                       gr.skip(), gr.update(interactive=False), gr.update(interactive=True), *no_results_change)
                 return
 
             try:
@@ -1267,6 +1398,144 @@ def build_demo() -> gr.Blocks:
             yield (log, plot_update, gr.update(interactive=True),
                    gr.update(value="Stop", interactive=False), *results_outputs)
 
+        # ── Generate Training Data tab handlers ─────────────────────────────────
+
+        def on_td_load_pr():
+            # results.json/phase_mask.npy are written non-atomically (plain json.dump/np.save,
+            # no temp-file+rename) — a click landing mid-write could hit a truncated/locked file.
+            try:
+                results = app_utils.load_phase_retrieval_results(str(RESULTS_DIR))
+            except Exception as exc:
+                return None, f"[ERROR] Could not load Phase Retrieval results: {exc}"
+            if results is None:
+                return None, "No Phase Retrieval results found yet — run Phase Retrieval first (Configure + Run tabs)."
+            status = (f"Loaded: d={results['d_um']:.1f} um, g_sigma={results['g_sigma']:.3f}, "
+                      f"nfp_offset={results['nfp_offset_um']:.3f} um, nfp_range={results['nfp_range_um']:.2f} um.")
+            return results, status
+
+        def on_td_frame_uploaded(file_path):
+            if not file_path:
+                return None, None, None, "No file selected."
+            try:
+                arr = _read_tiff_with_retry(file_path)
+            except Exception as exc:
+                return None, None, None, f"[ERROR] Could not read {file_path}: {exc}"
+            if arr.ndim == 3:
+                arr = arr[arr.shape[0] // 2]
+            elif arr.ndim != 2:
+                return None, None, None, f"[ERROR] Expected a 2D (or 3D Z-stack) TIFF, got shape {arr.shape}."
+            vmin, vmax = float(arr.min()), float(arr.max())
+            frame_state = {"array": arr, "vmin": vmin, "vmax": vmax}
+            gray = _normalize_slice(arr, vmin, vmax)
+            rgb = np.stack([gray, gray, gray], axis=-1)
+            return frame_state, None, rgb, "Frame loaded — click a region with no emitters."
+
+        def on_td_frame_click(evt: gr.SelectData, frame_state, w, h):
+            if not frame_state:
+                return gr.skip(), gr.skip(), "Upload an experimental frame first.", gr.skip(), gr.skip()
+            if w is None or h is None or float(w) <= 0 or float(h) <= 0:
+                return gr.skip(), gr.skip(), "Enter a positive noise-patch width/height first.", gr.skip(), gr.skip()
+            col, row = int(evt.index[0]), int(evt.index[1])
+            arr = frame_state["array"]
+            H, W = arr.shape
+            bbox = _crop_window_rect(row, col, int(w), int(h), H, W)
+            mean, std = app_utils.noise_patch_stats(arr, bbox)
+            gray = _normalize_slice(arr, frame_state["vmin"], frame_state["vmax"])
+            rgb = np.stack([gray, gray, gray], axis=-1).copy()
+            _draw_box(rgb, bbox, _PENDING_BOX_COLOR)
+            status = f"Marked region: mean={mean:.1f}, std={std:.1f}."
+            return bbox, rgb, status, max(0.0, mean - std), mean + 2 * std
+
+        def on_td_update_preview(pr_results, frame_state, *vals):
+            if pr_results is None:
+                return None, "Load Phase Retrieval Results first."
+            try:
+                cfg = fields_to_config(*vals)
+                param_dict = cfg.generate_training_param_dict(pr_results)
+                sim = app_utils.generate_training_frame(param_dict)
+            except Exception as exc:
+                return None, f"[ERROR] {exc}"
+
+            n_panels = 2 if frame_state else 1
+            fig = Figure(figsize=(5 * n_panels, 5), constrained_layout=True)
+            FigureCanvasAgg(fig)
+            axes = fig.subplots(1, n_panels)
+            axes = [axes] if n_panels == 1 else list(axes)
+            idx = 0
+            if frame_state:
+                arr = frame_state["array"]
+                axes[idx].imshow(arr, cmap="gray", vmin=frame_state["vmin"], vmax=frame_state["vmax"])
+                axes[idx].set_title("experimental frame")
+                axes[idx].axis("off")
+                idx += 1
+            axes[idx].imshow(sim, cmap="gray")
+            axes[idx].set_title("simulated frame")
+            axes[idx].axis("off")
+            return fig, "Preview updated."
+
+        def on_td_simulate(pr_results, out_dir, n_ims, *vals):
+            # also blocks against a concurrent Run-tab phase retrieval — see the matching guard
+            # in run_handler for why (shared sys.stdout redirection).
+            if _td_run_state["busy"] or _run_state["busy"]:
+                yield ("[ERROR] Another run (Phase Retrieval or Generate Training Data) is already in progress.",
+                       gr.update(interactive=False), gr.update(interactive=True))
+                return
+            if pr_results is None:
+                yield "[ERROR] Load Phase Retrieval Results first.", gr.update(interactive=True), gr.update(interactive=False)
+                return
+            try:
+                cfg = fields_to_config(*vals)
+                param_dict = cfg.generate_training_param_dict(pr_results)
+            except Exception as exc:
+                yield f"[CONFIG ERROR] {exc}", gr.update(interactive=True), gr.update(interactive=False)
+                return
+
+            q: queue.SimpleQueue = queue.SimpleQueue()
+            old_stdout = sys.stdout
+            sys.stdout = _StreamToQueue(q)
+            done_evt = threading.Event()
+            run_error: list = [None]
+            stop_event = threading.Event()
+            _td_run_state["stop_event"] = stop_event
+            _td_run_state["busy"] = True
+
+            def _worker():
+                try:
+                    app_utils.generate_training_data(param_dict, str(out_dir), int(n_ims), stop_event=stop_event)
+                except Exception as exc:
+                    q.put(f"\n[EXCEPTION] {exc}\n")
+                    run_error[0] = exc
+                finally:
+                    sys.stdout = old_stdout
+                    _td_run_state["busy"] = False
+                    done_evt.set()
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+            log = ""
+            while True:
+                try:
+                    chunk = q.get(timeout=0.2)
+                    log += chunk
+                except queue.Empty:
+                    if done_evt.is_set():
+                        break
+                stop_btn_update = gr.skip() if stop_event.is_set() else gr.update(interactive=True)
+                yield log, gr.update(interactive=False), stop_btn_update
+
+            while not q.empty():
+                log += q.get_nowait()
+
+            _td_run_state["stop_event"] = None
+            log += "\n\n--- DONE ---" if run_error[0] is None else f"\n\n--- FAILED: {run_error[0]} ---"
+            yield log, gr.update(interactive=True), gr.update(value="Stop", interactive=False)
+
+        def on_td_stop():
+            if _td_run_state["stop_event"] is not None:
+                _td_run_state["stop_event"].set()
+                gr.Info("Stop requested — finishing the current frame.", duration=6)
+            return gr.update(value="⏳ Stopping…", interactive=False)
+
         load_file.change(fn=load_handler, inputs=load_file, outputs=all_fields)
         save_btn.click(fn=save_handler, inputs=all_fields, outputs=save_status)
         folder_upload.upload(
@@ -1357,6 +1626,24 @@ def build_demo() -> gr.Blocks:
             inputs=[emitters_state, results_beads_state, raw_stack_state],
             outputs=[results_dropdown, results_image, results_plot, results_status],
         )
+        td_load_pr_btn.click(fn=on_td_load_pr, outputs=[td_pr_results_state, td_pr_status])
+        td_frame_upload.upload(
+            fn=on_td_frame_uploaded, inputs=[td_frame_upload],
+            outputs=[td_frame_state, td_noise_bbox_state, td_frame_image, td_noise_status],
+        )
+        td_frame_image.select(
+            fn=on_td_frame_click, inputs=[td_frame_state, td_noise_w, td_noise_h],
+            outputs=[td_noise_bbox_state, td_frame_image, td_noise_status, td_bg_min, td_bg_max],
+        )
+        td_update_preview_btn.click(
+            fn=on_td_update_preview, inputs=[td_pr_results_state, td_frame_state] + all_fields,
+            outputs=[td_preview_plot, td_preview_status],
+        )
+        td_simulate_btn.click(
+            fn=on_td_simulate, inputs=[td_pr_results_state, td_out_dir, td_n_ims] + all_fields,
+            outputs=[td_log_out, td_simulate_btn, td_stop_btn],
+        )
+        td_stop_btn.click(fn=on_td_stop, outputs=td_stop_btn)
 
     demo.queue()
     return demo
