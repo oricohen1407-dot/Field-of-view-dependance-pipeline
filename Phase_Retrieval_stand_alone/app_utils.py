@@ -1103,12 +1103,18 @@ def _simulate_one_frame(model, sampling, param_dict):
         c = int(round(x_um / ps_xy + (W - 1) / 2))
         r = int(round(y_um / ps_xy + (H - 1) / 2))
         patch = model.psf_patch_clean(xyzps[k].astype(np.float32))
-        pr, pc = patch.shape[0] // 2, patch.shape[1] // 2
-        rr0, rr1 = max(0, r - pr), min(H, r + pr + 1)
-        cc0, cc1 = max(0, c - pc), min(W, c + pc + 1)
+        ph, pw = patch.shape
+        # ph//2 elements before the center row, ph-ph//2 at/after it -- NOT symmetric ("+1")
+        # for an even ph. The old `rr1 = r + pr + 1` assumed an odd patch size (true 121x121
+        # default); for an even canvas_size_px (e.g. 122) psf_patch_clean's crop is even-sized
+        # too, and that "+1" overshoots the patch by one row/col in EVERY placement (not just
+        # near edges), so numpy silently truncates the source slice and the +=  shapes mismatch.
+        pr_lo, pc_lo = ph // 2, pw // 2
+        rr0, rr1 = max(0, r - pr_lo), min(H, r + (ph - pr_lo))
+        cc0, cc1 = max(0, c - pc_lo), min(W, c + (pw - pc_lo))
         if rr0 >= rr1 or cc0 >= cc1:
             continue
-        pr0, pc0 = rr0 - (r - pr), cc0 - (c - pc)
+        pr0, pc0 = rr0 - (r - pr_lo), cc0 - (c - pc_lo)
         canvas[rr0:rr1, cc0:cc1] += patch[pr0:pr0 + (rr1 - rr0), pc0:pc0 + (cc1 - cc0)]
 
     bg_lo, bg_hi = param_dict['shot_noise_background_range']
