@@ -879,6 +879,7 @@ def build_demo() -> gr.Blocks:
                         )
                         td_noise_w = gr.Number(label="Marked-patch width (px)", value=40, precision=0)
                         td_noise_h = gr.Number(label="Marked-patch height (px)", value=40, precision=0)
+                td_z_slider = gr.Slider(label="Z-slice (browse)", minimum=0, maximum=1, step=1, value=0)
                 td_frame_state = gr.State(None)
                 td_noise_bbox_state = gr.State(None)
                 td_emitter_bbox_state = gr.State(None)
@@ -1438,25 +1439,32 @@ def build_demo() -> gr.Blocks:
             return _load_pr_results_and_status()
 
         def on_td_frame_uploaded(file_path):
+            no_z = gr.update(minimum=0, maximum=1, value=0)
             if not file_path:
-                return None, None, None, None, "No file selected."
+                return None, None, None, None, "No file selected.", no_z
             try:
                 arr = _read_tiff_with_retry(file_path)
             except Exception as exc:
-                return None, None, None, None, f"[ERROR] Could not read {file_path}: {exc}"
-            if arr.ndim == 3:
-                arr = arr[arr.shape[0] // 2]
-            elif arr.ndim != 2:
-                return None, None, None, None, f"[ERROR] Expected a 2D (or 3D Z-stack) TIFF, got shape {arr.shape}."
+                return None, None, None, None, f"[ERROR] Could not read {file_path}: {exc}", no_z
+            if arr.ndim == 2:
+                arr = arr[None, ...]
+            elif arr.ndim != 3:
+                return (None, None, None, None,
+                        f"[ERROR] Expected a 2D (or 3D Z-stack) TIFF, got shape {arr.shape}.", no_z)
+            Z = arr.shape[0]
             vmin, vmax = float(arr.min()), float(arr.max())
-            frame_state = {"array": arr, "vmin": vmin, "vmax": vmax}
-            gray = _normalize_slice(arr, vmin, vmax)
-            rgb = np.stack([gray, gray, gray], axis=-1)
+            frame_state = {"array": arr, "vmin": vmin, "vmax": vmax, "Z": Z}
+            mid_z = Z // 2
+            rgb = _render_td_marks(frame_state, mid_z, None, None)
+            z_update = gr.update(minimum=0, maximum=max(Z - 1, 0), value=mid_z, step=1)
             return (frame_state, None, None, rgb,
-                    "Frame loaded — mark a no-emitter region and a bright-emitter region.")
+                    "Frame loaded — mark a no-emitter region and a bright-emitter region. "
+                    "Use Z-slice to browse other frames of the stack (e.g. to catch a blinking emitter).",
+                    z_update)
 
-        def _render_td_marks(frame_state, noise_bbox, emitter_bbox):
-            gray = _normalize_slice(frame_state["array"], frame_state["vmin"], frame_state["vmax"])
+        def _render_td_marks(frame_state, z, noise_bbox, emitter_bbox):
+            z = max(0, min(int(z), frame_state["Z"] - 1))
+            gray = _normalize_slice(frame_state["array"][z], frame_state["vmin"], frame_state["vmax"])
             rgb = np.stack([gray, gray, gray], axis=-1).copy()
             if noise_bbox is not None:
                 _draw_box(rgb, noise_bbox, _PENDING_BOX_COLOR)
@@ -1464,7 +1472,12 @@ def build_demo() -> gr.Blocks:
                 _draw_box(rgb, emitter_bbox, _TD_EMITTER_BOX_COLOR)
             return rgb
 
-        def on_td_frame_click(evt: gr.SelectData, frame_state, w, h, mode,
+        def on_td_z_slider_change(z, frame_state, noise_bbox, emitter_bbox):
+            if not frame_state:
+                return gr.skip()
+            return _render_td_marks(frame_state, z, noise_bbox, emitter_bbox)
+
+        def on_td_frame_click(evt: gr.SelectData, frame_state, w, h, mode, z,
                                noise_bbox, emitter_bbox, pr_results, *vals):
             no_seed = (gr.skip(),) * 6
             if not frame_state:
@@ -1472,14 +1485,15 @@ def build_demo() -> gr.Blocks:
             if w is None or h is None or float(w) <= 0 or float(h) <= 0:
                 return (gr.skip(), gr.skip(), gr.skip(),
                         "Enter a positive marked-patch width/height first.", *no_seed)
+            z = max(0, min(int(z), frame_state["Z"] - 1))
+            arr = frame_state["array"][z]
             col, row = int(evt.index[0]), int(evt.index[1])
-            arr = frame_state["array"]
             H, W = arr.shape
             bbox = _crop_window_rect(row, col, int(w), int(h), H, W)
             is_noise_mode = mode.startswith("No-emitter")
             noise_bbox = bbox if is_noise_mode else noise_bbox
             emitter_bbox = bbox if not is_noise_mode else emitter_bbox
-            rgb = _render_td_marks(frame_state, noise_bbox, emitter_bbox)
+            rgb = _render_td_marks(frame_state, z, noise_bbox, emitter_bbox)
 
             if noise_bbox is None or emitter_bbox is None:
                 missing = "a bright-emitter region" if noise_bbox is not None else "a no-emitter region"
@@ -1523,7 +1537,7 @@ def build_demo() -> gr.Blocks:
             return (noise_bbox, emitter_bbox, rgb, status,
                     bg_min, bg_max, off_min, off_max, sig_min, sig_max)
 
-        def on_td_update_preview(pr_results, frame_state, *vals):
+        def on_td_update_preview(pr_results, frame_state, z, *vals):
             if pr_results is None:
                 return None, "Load Phase Retrieval Results first."
             try:
@@ -1540,9 +1554,10 @@ def build_demo() -> gr.Blocks:
             axes = [axes] if n_panels == 1 else list(axes)
             idx = 0
             if frame_state:
-                arr = frame_state["array"]
+                zc = max(0, min(int(z), frame_state["Z"] - 1))
+                arr = frame_state["array"][zc]
                 axes[idx].imshow(arr, cmap="gray", vmin=frame_state["vmin"], vmax=frame_state["vmax"])
-                axes[idx].set_title("experimental frame")
+                axes[idx].set_title(f"experimental frame (z={zc})")
                 axes[idx].axis("off")
                 idx += 1
             axes[idx].imshow(sim, cmap="gray")
@@ -1707,17 +1722,23 @@ def build_demo() -> gr.Blocks:
         td_frame_upload.upload(
             fn=on_td_frame_uploaded, inputs=[td_frame_upload],
             outputs=[td_frame_state, td_noise_bbox_state, td_emitter_bbox_state,
-                     td_frame_image, td_noise_status],
+                     td_frame_image, td_noise_status, td_z_slider],
+        )
+        td_z_slider.change(
+            fn=on_td_z_slider_change,
+            inputs=[td_z_slider, td_frame_state, td_noise_bbox_state, td_emitter_bbox_state],
+            outputs=[td_frame_image],
         )
         td_frame_image.select(
             fn=on_td_frame_click,
-            inputs=[td_frame_state, td_noise_w, td_noise_h, td_mark_mode,
+            inputs=[td_frame_state, td_noise_w, td_noise_h, td_mark_mode, td_z_slider,
                     td_noise_bbox_state, td_emitter_bbox_state, td_pr_results_state] + all_fields,
             outputs=[td_noise_bbox_state, td_emitter_bbox_state, td_frame_image, td_noise_status,
                      td_bg_min, td_bg_max, td_noise_off_min, td_noise_off_max, td_sig_min, td_sig_max],
         )
         td_update_preview_btn.click(
-            fn=on_td_update_preview, inputs=[td_pr_results_state, td_frame_state] + all_fields,
+            fn=on_td_update_preview,
+            inputs=[td_pr_results_state, td_frame_state, td_z_slider] + all_fields,
             outputs=[td_preview_plot, td_preview_status],
         )
         td_simulate_btn.click(
