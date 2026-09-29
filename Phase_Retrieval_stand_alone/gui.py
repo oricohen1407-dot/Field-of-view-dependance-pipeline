@@ -1165,7 +1165,12 @@ def build_demo() -> gr.Blocks:
             img = _render_raw_frame(stack_state, mid_z, [])
             return (
                 stack_state, [], None,
-                gr.update(minimum=0, maximum=z_last, value=mid_z, step=1),
+                # gr.Slider requires minimum < maximum strictly -- a single-frame (Z=1, non-
+                # stack) upload would otherwise crash with maximum=z_last=0=minimum. Keep the
+                # slider's own maximum at least 1, and disable it when there's truly only one
+                # frame to browse (z_last/z_min_display/z_max_display below stay at their real
+                # values -- those are plain Numbers with no such constraint).
+                gr.update(minimum=0, maximum=max(z_last, 1), value=mid_z, step=1, interactive=Z > 1),
                 0, z_last,
                 _range_display_text(0, z_last, Z),
                 img, None,
@@ -1543,7 +1548,10 @@ def build_demo() -> gr.Blocks:
             frame_state = {"array": arr, "vmin": vmin, "vmax": vmax, "Z": Z}
             mid_z = Z // 2
             rgb = _render_td_marks(frame_state, mid_z, None, None)
-            z_update = gr.update(minimum=0, maximum=max(Z - 1, 0), value=mid_z, step=1)
+            # gr.Slider requires minimum < maximum strictly -- a single-frame (Z=1) upload,
+            # which is a normal/expected input here (a plain experimental frame, not
+            # necessarily a stack), would otherwise crash with maximum=0=minimum.
+            z_update = gr.update(minimum=0, maximum=max(Z - 1, 1), value=mid_z, step=1, interactive=Z > 1)
             return (frame_state, None, None, rgb,
                     "Frame loaded — mark a no-emitter region and a bright-emitter region. "
                     "Use Z-slice to browse other frames of the stack (e.g. to catch a blinking emitter).",
