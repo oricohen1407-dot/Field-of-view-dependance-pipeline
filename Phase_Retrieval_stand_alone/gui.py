@@ -81,6 +81,79 @@ CRITICAL_CSS = """
 }
 """
 
+# Draws a square/rectangle "cursor" that tracks the mouse over an image and resizes live to
+# match the currently-typed crop dimensions (in the image's own pixel space, not CSS pixels --
+# scaled by the displayed <img>'s naturalWidth/naturalHeight vs. its on-screen size). Runs once
+# at page load via demo.load(..., js=...); a real <script> tag inside gr.HTML would NOT execute
+# (browsers don't run scripts inserted via innerHTML), so this is Gradio's actual supported
+# mechanism for custom page-load JS. Uses elem_id + a generic `#id img` / `#id input` descendant
+# selector rather than guessing at Gradio's internal component class names, and re-queries the
+# DOM on every mousemove rather than caching the <img> node, so it keeps working even if Gradio
+# replaces that node on a later image update (e.g. after marking a region).
+SETUP_CROP_CURSOR_JS = """
+() => {
+    function readNumberInput(elemId) {
+        const el = document.getElementById(elemId);
+        const inp = el ? el.querySelector('input') : null;
+        const v = inp ? parseFloat(inp.value) : NaN;
+        return (isNaN(v) || v <= 0) ? 0 : v;
+    }
+    function readRadioColor(elemId, colorMap, fallback) {
+        const el = document.getElementById(elemId);
+        const checked = el ? el.querySelector('input[type=radio]:checked') : null;
+        if (checked && colorMap[checked.value]) return colorMap[checked.value];
+        return fallback;
+    }
+    function setupCropCursor(imageId, widthId, heightId, colorOrFn) {
+        const overlay = document.createElement('div');
+        overlay.style.position = 'fixed';
+        overlay.style.pointerEvents = 'none';
+        overlay.style.display = 'none';
+        overlay.style.zIndex = '9999';
+        overlay.style.boxSizing = 'border-box';
+        overlay.style.borderWidth = '2px';
+        overlay.style.borderStyle = 'solid';
+        document.body.appendChild(overlay);
+
+        document.addEventListener('mousemove', (e) => {
+            const container = document.getElementById(imageId);
+            const img = container ? container.querySelector('img') : null;
+            if (!img) { overlay.style.display = 'none'; return; }
+            const rect = img.getBoundingClientRect();
+            const inside = e.clientX >= rect.left && e.clientX <= rect.right &&
+                           e.clientY >= rect.top && e.clientY <= rect.bottom;
+            if (!inside) { overlay.style.display = 'none'; return; }
+            img.style.cursor = 'none';
+            const wPx = readNumberInput(widthId);
+            const hPx = readNumberInput(heightId);
+            if (!wPx || !hPx || !img.naturalWidth || !img.naturalHeight) {
+                overlay.style.display = 'none';
+                return;
+            }
+            const scaleX = rect.width / img.naturalWidth;
+            const scaleY = rect.height / img.naturalHeight;
+            const wCss = wPx * scaleX;
+            const hCss = hPx * scaleY;
+            const color = typeof colorOrFn === 'function' ? colorOrFn() : colorOrFn;
+            overlay.style.borderColor = color;
+            overlay.style.background = color + '26';
+            overlay.style.width = wCss + 'px';
+            overlay.style.height = hCss + 'px';
+            overlay.style.left = (e.clientX - wCss / 2) + 'px';
+            overlay.style.top = (e.clientY - hCss / 2) + 'px';
+            overlay.style.display = 'block';
+        });
+    }
+
+    setupCropCursor('calib_raw_image', 'calib_crop_size', 'calib_crop_size', '#ff2828');
+    setupCropCursor('td_frame_image', 'td_noise_w', 'td_noise_h', () => readRadioColor(
+        'td_mark_mode',
+        {'No-emitter region (baseline)': '#ff2828', 'Bright emitter (peak signal)': '#00dcff'},
+        '#ff2828'
+    ));
+}
+"""
+
 
 def _default_config() -> Config:
     """Same experiment defaults main.py uses, for when no saved config.json exists yet.
@@ -301,7 +374,8 @@ def _normalize_slice(slice2d: np.ndarray, vmin: float, vmax: float) -> np.ndarra
 
 
 _PENDING_BOX_COLOR = (255, 40, 40)     # red — current unconfirmed click
-_CONFIRMED_BOX_COLOR = (255, 230, 0)   # yellow — already-saved emitter crops
+_CONFIRMED_BOX_COLOR = (255, 230, 0)   # yellow — already-saved OFF-axis emitter crops
+_ONAXIS_BOX_COLOR = (60, 220, 90)      # green — the on-axis (central) emitter crop, distinct from off-axis
 _TD_EMITTER_BOX_COLOR = (0, 220, 255)  # cyan — Generate Training Data tab's marked bright-emitter region
 _BOX_THICKNESS = 2
 
@@ -321,14 +395,16 @@ def _draw_box(rgb: np.ndarray, bbox, color, thickness: int = _BOX_THICKNESS) -> 
 
 
 def _render_raw_frame(stack_state: dict, z, emitters: list, pending: dict | None = None) -> np.ndarray:
-    """Grayscale Z-slice rendered as RGB with hollow-square markers: yellow for every confirmed
-    emitter's saved crop (accumulates as more are picked), red for the current unconfirmed
-    pending crop (if any) — same crop-sized square used as the click "crosshair"."""
+    """Grayscale Z-slice rendered as RGB with hollow-square markers: green for the on-axis
+    (central) emitter's saved crop, yellow for every other confirmed OFF-axis emitter crop
+    (accumulates as more are picked), red for the current unconfirmed pending crop (if any) —
+    same crop-sized square used as the click "crosshair"."""
     z = max(0, min(int(z), stack_state["Z"] - 1))
     gray = _normalize_slice(stack_state["array"][z], stack_state["vmin"], stack_state["vmax"])
     rgb = np.stack([gray, gray, gray], axis=-1).copy()
     for e in emitters:
-        _draw_box(rgb, e["bbox"], _CONFIRMED_BOX_COLOR)
+        color = _ONAXIS_BOX_COLOR if e.get("is_onaxis") else _CONFIRMED_BOX_COLOR
+        _draw_box(rgb, e["bbox"], color)
     if pending is not None:
         _draw_box(rgb, pending["bbox"], _PENDING_BOX_COLOR)
     return rgb
@@ -693,7 +769,9 @@ def build_demo() -> gr.Blocks:
                             raw_file_upload = gr.File(
                                 label="Browse for raw calibration .tif", file_count="single",
                             )
-                            crop_size_input = gr.Number(label="Crop size (px)", value=70, precision=0)
+                            crop_size_input = gr.Number(
+                                label="Crop size (px)", value=70, precision=0, elem_id="calib_crop_size",
+                            )
                         z_slider = gr.Slider(label="Z-slice (browse)", minimum=0, maximum=1, step=1, value=0)
                         with gr.Row(equal_height=True):
                             set_min_btn = gr.Button("Set min z-slice")
@@ -703,6 +781,7 @@ def build_demo() -> gr.Blocks:
                         z_range_display = gr.Markdown("")
                         raw_image = gr.Image(
                             label="Raw calibration data — click an emitter", interactive=False,
+                            elem_id="calib_raw_image",
                         )
                         setup_instruction = gr.Markdown("Browse a raw .tif file to begin.")
                         cropped_image = gr.Image(
@@ -876,14 +955,22 @@ def build_demo() -> gr.Blocks:
                         td_mark_mode = gr.Radio(
                             ["No-emitter region (baseline)", "Bright emitter (peak signal)"],
                             value="No-emitter region (baseline)", label="Click marks",
+                            elem_id="td_mark_mode",
                         )
-                        td_noise_w = gr.Number(label="Marked-patch width (px)", value=40, precision=0)
-                        td_noise_h = gr.Number(label="Marked-patch height (px)", value=40, precision=0)
+                        td_noise_w = gr.Number(
+                            label="Marked-patch width (px)", value=40, precision=0, elem_id="td_noise_w",
+                        )
+                        td_noise_h = gr.Number(
+                            label="Marked-patch height (px)", value=40, precision=0, elem_id="td_noise_h",
+                        )
                 td_z_slider = gr.Slider(label="Z-slice (browse)", minimum=0, maximum=1, step=1, value=0)
                 td_frame_state = gr.State(None)
                 td_noise_bbox_state = gr.State(None)
                 td_emitter_bbox_state = gr.State(None)
-                td_frame_image = gr.Image(label="Click to mark the selected region type", interactive=False)
+                td_frame_image = gr.Image(
+                    label="Click to mark the selected region type", interactive=False,
+                    elem_id="td_frame_image",
+                )
                 td_noise_status = gr.Textbox(
                     show_label=False, interactive=False,
                     placeholder="Upload a frame, then mark both a no-emitter and a bright-emitter region.",
@@ -1746,6 +1833,8 @@ def build_demo() -> gr.Blocks:
             outputs=[td_log_out, td_simulate_btn, td_stop_btn],
         )
         td_stop_btn.click(fn=on_td_stop, outputs=td_stop_btn)
+
+        demo.load(None, None, None, js=SETUP_CROP_CURSOR_JS)
 
     demo.queue()
     return demo
