@@ -13,7 +13,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 from image_model import ImModel_pr
-from DS3Dplus.ds3d_utils import ImModel, ImModelTraining, Sampling
+from DS3Dplus.ds3d_utils import ImModel, ImModelBase, ImModelTraining, Sampling
 
 def _load_zstack_with_count(path: str):
     """Z (slice count) is authoritative from the file itself — these TIFFs carry no
@@ -1051,6 +1051,41 @@ def noise_patch_stats(frame: np.ndarray, bbox):
     r0, r1, c0, c1 = bbox
     patch = frame[r0:r1, c0:c1]
     return float(patch.mean()), float(patch.std())
+
+
+def estimate_signal_range(param_dict: dict, baseline_mu: float, exp_maxv: float, photon_count: float = 1e4):
+    """Back-solves an (Nsig_range) photon-count range from a real experimental emitter's peak
+    brightness: render a reference on-axis emitter at a known photon_count (mid-z), and compare
+    its simulated peak pixel value to the real observed peak-above-baseline
+    (exp_maxv - baseline_mu, from a user-marked bright-emitter patch vs. a user-marked
+    no-emitter patch) to solve for the true photon count. Returns (sig_min, sig_max), rounded to
+    the nearest 1000 like root's func3.
+
+    Deliberately NOT root's mu_std_p() formula (p = photon_count / (sim_peak + mu) * exp_maxv):
+    that adds the baseline to the simulated (noise-free) reference peak before dividing, which
+    only cancels correctly when photon_count happens to be close to the true photon count being
+    solved for -- otherwise it's biased (verified: off by ~4.85x in a synthetic case with
+    true_photons=2000, photon_count=1e4, baseline comparable to the true peak-above-baseline).
+    Since this tab has the user mark both a no-emitter AND a bright-emitter patch (unlike root's
+    GUI, which only marks one ROI), baseline can be subtracted from both the real and simulated
+    sides before scaling, which is exact regardless of photon_count's value:
+        (exp_maxv - baseline_mu) / true_photons == sim_peak(photon_count) / photon_count
+        => true_photons = (exp_maxv - baseline_mu) * photon_count / sim_peak(photon_count)
+    """
+    model = ImModelBase(param_dict)
+    zmin, zmax = param_dict['zrange']
+    xyzp = np.array([[0.0, 0.0, (zmin + zmax) / 2.0, photon_count]], dtype=np.float32)
+    xyzps = torch.from_numpy(xyzp).to(param_dict['device'])
+    sim_peak = float(model.get_psfs(xyzps).detach().cpu().numpy().max())
+    if sim_peak <= 0:
+        raise ValueError("simulated reference PSF peak is non-positive -- check the fitted phase mask/d")
+    p = (exp_maxv - baseline_mu) * photon_count / sim_peak
+    if p <= 0:
+        raise ValueError(
+            f"estimated photon count is non-positive ({p:.1f}) -- the marked bright-emitter "
+            f"patch's peak ({exp_maxv:.1f}) isn't brighter than the marked baseline ({baseline_mu:.1f})"
+        )
+    return round(0.5 * p / 1e3) * 1e3, round(1.1 * p / 1e3) * 1e3
 
 
 def _simulate_one_frame(model, sampling, param_dict):

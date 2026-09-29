@@ -91,13 +91,13 @@ class AdvancedConfig:
 class TrainingDataConfig:
     # --- Primary (adjust in the "Generate Training Data" tab, then Update Preview) ---
     signal_range: str = "500, 3000"        # Nsig_range (photons/emitter)
-    background_range: str = "80, 150"      # background level (counts); sqrt'd into shot_noise_background_range
-    density_range: str = "1, 10"           # num_particles_range (emitters/frame)
+    background_range: str = "80, 150"      # shot-noise VARIANCE (counts²), not a level; sqrt'd into shot_noise_background_range
+    density_range: str = "1, 35"           # num_particles_range (emitters/frame); 35 matches root's max_num_particles default
     zrange_um: str = ""                    # "" => inherit UserConfig.zrange at generation time
 
     # --- Secondary / advanced ---
     canvas_size_px: int = 121              # H = W of generated frames
-    num_z_voxel: int = 21                  # D
+    num_z_voxel: int = 81                  # D; matches root's num_z_voxel default
     us_factor: int = 1
     blob_r: int = 3
     blob_sigma: float = 0.65

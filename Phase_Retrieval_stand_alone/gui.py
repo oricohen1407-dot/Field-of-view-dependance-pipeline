@@ -302,6 +302,7 @@ def _normalize_slice(slice2d: np.ndarray, vmin: float, vmax: float) -> np.ndarra
 
 _PENDING_BOX_COLOR = (255, 40, 40)     # red — current unconfirmed click
 _CONFIRMED_BOX_COLOR = (255, 230, 0)   # yellow — already-saved emitter crops
+_TD_EMITTER_BOX_COLOR = (0, 220, 255)  # cyan — Generate Training Data tab's marked bright-emitter region
 _BOX_THICKNESS = 2
 
 
@@ -840,18 +841,29 @@ def build_demo() -> gr.Blocks:
                     )
                 td_pr_results_state = gr.State(None)
 
-                gr.Markdown("### 2. Upload an experimental frame and mark a no-emitter region")
+                gr.Markdown(
+                    "### 2. Upload an experimental frame and mark two reference regions\n"
+                    "Mark a **no-emitter** patch (baseline/noise) and a **bright emitter** patch "
+                    "(peak signal) — together they calibrate Background, Noise offset, and Signal "
+                    "against your real data, mirroring how the root pipeline's SNR-characterization "
+                    "step works."
+                )
                 with gr.Row(equal_height=True):
                     td_frame_upload = gr.File(label="Experimental frame (.tif)", file_count="single")
                     with gr.Column():
-                        td_noise_w = gr.Number(label="Noise-patch width (px)", value=40, precision=0)
-                        td_noise_h = gr.Number(label="Noise-patch height (px)", value=40, precision=0)
+                        td_mark_mode = gr.Radio(
+                            ["No-emitter region (baseline)", "Bright emitter (peak signal)"],
+                            value="No-emitter region (baseline)", label="Click marks",
+                        )
+                        td_noise_w = gr.Number(label="Marked-patch width (px)", value=40, precision=0)
+                        td_noise_h = gr.Number(label="Marked-patch height (px)", value=40, precision=0)
                 td_frame_state = gr.State(None)
                 td_noise_bbox_state = gr.State(None)
-                td_frame_image = gr.Image(label="Click to mark a no-emitter region", interactive=False)
+                td_emitter_bbox_state = gr.State(None)
+                td_frame_image = gr.Image(label="Click to mark the selected region type", interactive=False)
                 td_noise_status = gr.Textbox(
                     show_label=False, interactive=False,
-                    placeholder="Upload a frame, then click a no-emitter region to see its mean/std.",
+                    placeholder="Upload a frame, then mark both a no-emitter and a bright-emitter region.",
                 )
 
                 gr.Markdown("### 3. Parameters — adjust, then Update Preview")
@@ -859,8 +871,8 @@ def build_demo() -> gr.Blocks:
                     td_sig_min = gr.Number(label="Signal min (photons)", value=defaults[47])
                     td_sig_max = gr.Number(label="Signal max (photons)", value=defaults[48])
                 with gr.Row(equal_height=True):
-                    td_bg_min = gr.Number(label="Background min (counts)", value=defaults[49])
-                    td_bg_max = gr.Number(label="Background max (counts)", value=defaults[50])
+                    td_bg_min = gr.Number(label="Background noise variance min (counts²)", value=defaults[49])
+                    td_bg_max = gr.Number(label="Background noise variance max (counts²)", value=defaults[50])
                 with gr.Row(equal_height=True):
                     td_density_min = gr.Number(label="Emitters/frame min", value=defaults[51], precision=0)
                     td_density_max = gr.Number(label="Emitters/frame max", value=defaults[52], precision=0)
@@ -878,8 +890,8 @@ def build_demo() -> gr.Blocks:
                         td_blob_sigma = gr.Number(label="Blob sigma", value=defaults[59])
                         td_blob_maxv = gr.Number(label="Blob max value", value=defaults[60])
                     with gr.Row(equal_height=True):
-                        td_noise_off_min = gr.Number(label="Noise offset min", value=defaults[61])
-                        td_noise_off_max = gr.Number(label="Noise offset max", value=defaults[62])
+                        td_noise_off_min = gr.Number(label="Baseline / noise offset min (counts)", value=defaults[61])
+                        td_noise_off_max = gr.Number(label="Baseline / noise offset max (counts)", value=defaults[62])
 
                 td_update_preview_btn = gr.Button("Update Preview")
                 td_preview_plot = gr.Plot(show_label=False)
@@ -1415,36 +1427,89 @@ def build_demo() -> gr.Blocks:
 
         def on_td_frame_uploaded(file_path):
             if not file_path:
-                return None, None, None, "No file selected."
+                return None, None, None, None, "No file selected."
             try:
                 arr = _read_tiff_with_retry(file_path)
             except Exception as exc:
-                return None, None, None, f"[ERROR] Could not read {file_path}: {exc}"
+                return None, None, None, None, f"[ERROR] Could not read {file_path}: {exc}"
             if arr.ndim == 3:
                 arr = arr[arr.shape[0] // 2]
             elif arr.ndim != 2:
-                return None, None, None, f"[ERROR] Expected a 2D (or 3D Z-stack) TIFF, got shape {arr.shape}."
+                return None, None, None, None, f"[ERROR] Expected a 2D (or 3D Z-stack) TIFF, got shape {arr.shape}."
             vmin, vmax = float(arr.min()), float(arr.max())
             frame_state = {"array": arr, "vmin": vmin, "vmax": vmax}
             gray = _normalize_slice(arr, vmin, vmax)
             rgb = np.stack([gray, gray, gray], axis=-1)
-            return frame_state, None, rgb, "Frame loaded — click a region with no emitters."
+            return (frame_state, None, None, rgb,
+                    "Frame loaded — mark a no-emitter region and a bright-emitter region.")
 
-        def on_td_frame_click(evt: gr.SelectData, frame_state, w, h):
+        def _render_td_marks(frame_state, noise_bbox, emitter_bbox):
+            gray = _normalize_slice(frame_state["array"], frame_state["vmin"], frame_state["vmax"])
+            rgb = np.stack([gray, gray, gray], axis=-1).copy()
+            if noise_bbox is not None:
+                _draw_box(rgb, noise_bbox, _PENDING_BOX_COLOR)
+            if emitter_bbox is not None:
+                _draw_box(rgb, emitter_bbox, _TD_EMITTER_BOX_COLOR)
+            return rgb
+
+        def on_td_frame_click(evt: gr.SelectData, frame_state, w, h, mode,
+                               noise_bbox, emitter_bbox, pr_results, *vals):
+            no_seed = (gr.skip(),) * 6
             if not frame_state:
-                return gr.skip(), gr.skip(), "Upload an experimental frame first.", gr.skip(), gr.skip()
+                return gr.skip(), gr.skip(), gr.skip(), "Upload an experimental frame first.", *no_seed
             if w is None or h is None or float(w) <= 0 or float(h) <= 0:
-                return gr.skip(), gr.skip(), "Enter a positive noise-patch width/height first.", gr.skip(), gr.skip()
+                return (gr.skip(), gr.skip(), gr.skip(),
+                        "Enter a positive marked-patch width/height first.", *no_seed)
             col, row = int(evt.index[0]), int(evt.index[1])
             arr = frame_state["array"]
             H, W = arr.shape
             bbox = _crop_window_rect(row, col, int(w), int(h), H, W)
-            mean, std = app_utils.noise_patch_stats(arr, bbox)
-            gray = _normalize_slice(arr, frame_state["vmin"], frame_state["vmax"])
-            rgb = np.stack([gray, gray, gray], axis=-1).copy()
-            _draw_box(rgb, bbox, _PENDING_BOX_COLOR)
-            status = f"Marked region: mean={mean:.1f}, std={std:.1f}."
-            return bbox, rgb, status, max(0.0, mean - std), mean + 2 * std
+            is_noise_mode = mode.startswith("No-emitter")
+            noise_bbox = bbox if is_noise_mode else noise_bbox
+            emitter_bbox = bbox if not is_noise_mode else emitter_bbox
+            rgb = _render_td_marks(frame_state, noise_bbox, emitter_bbox)
+
+            if noise_bbox is None or emitter_bbox is None:
+                missing = "a bright-emitter region" if noise_bbox is not None else "a no-emitter region"
+                status = f"Marked. Now also mark {missing} to calibrate Background/Noise offset/Signal."
+                return noise_bbox, emitter_bbox, rgb, status, *no_seed
+
+            # _simulate_one_frame does poisson(canvas + background) - background + offset:
+            # `background` is subtracted back out after sampling, so it only ever contributes
+            # NOISE VARIANCE to the output, never a mean shift; `offset` is the only thing that
+            # sets the actual output baseline. So the no-emitter patch's mean (the real camera
+            # baseline) seeds Noise offset, and its std^2 (the real noise variance) seeds
+            # Background -- not the other way around, which was the original bug: it injected
+            # the raw baseline as if it were noise variance (way too much noise) while leaving
+            # the simulated background sitting at ~0 instead of the real baseline.
+            mean, std = app_utils.noise_patch_stats(arr, noise_bbox)
+            variance = std ** 2
+            bg_min, bg_max = max(0.0, 0.7 * variance), 1.3 * variance
+            off_min = off_max = mean
+            er0, er1, ec0, ec1 = emitter_bbox
+            exp_maxv = float(arr[er0:er1, ec0:ec1].max())
+
+            if pr_results is None:
+                status = (f"Baseline mean={mean:.1f}, std={std:.1f}; emitter peak={exp_maxv:.1f}. "
+                          f"Seeded Background≈{variance:.1f}, Noise offset≈{mean:.1f}. "
+                          f"Load Phase Retrieval Results to also calibrate Signal.")
+                return (noise_bbox, emitter_bbox, rgb, status,
+                        bg_min, bg_max, off_min, off_max, gr.skip(), gr.skip())
+
+            try:
+                cfg = fields_to_config(*vals)
+                param_dict = cfg.generate_training_param_dict(pr_results)
+                sig_min, sig_max = app_utils.estimate_signal_range(param_dict, mean, exp_maxv)
+                status = (f"Baseline mean={mean:.1f}, std={std:.1f}; emitter peak={exp_maxv:.1f}. "
+                          f"Seeded Background≈{variance:.1f}, Noise offset≈{mean:.1f}, "
+                          f"Signal≈({sig_min:.0f},{sig_max:.0f}) photons.")
+            except Exception as exc:
+                sig_min = sig_max = gr.skip()
+                status = (f"Baseline mean={mean:.1f}, std={std:.1f}; emitter peak={exp_maxv:.1f}. "
+                          f"Seeded Background/Noise offset, but Signal calibration failed: {exc}")
+
+            return (noise_bbox, emitter_bbox, rgb, status,
+                    bg_min, bg_max, off_min, off_max, sig_min, sig_max)
 
         def on_td_update_preview(pr_results, frame_state, *vals):
             if pr_results is None:
@@ -1629,11 +1694,15 @@ def build_demo() -> gr.Blocks:
         td_load_pr_btn.click(fn=on_td_load_pr, outputs=[td_pr_results_state, td_pr_status])
         td_frame_upload.upload(
             fn=on_td_frame_uploaded, inputs=[td_frame_upload],
-            outputs=[td_frame_state, td_noise_bbox_state, td_frame_image, td_noise_status],
+            outputs=[td_frame_state, td_noise_bbox_state, td_emitter_bbox_state,
+                     td_frame_image, td_noise_status],
         )
         td_frame_image.select(
-            fn=on_td_frame_click, inputs=[td_frame_state, td_noise_w, td_noise_h],
-            outputs=[td_noise_bbox_state, td_frame_image, td_noise_status, td_bg_min, td_bg_max],
+            fn=on_td_frame_click,
+            inputs=[td_frame_state, td_noise_w, td_noise_h, td_mark_mode,
+                    td_noise_bbox_state, td_emitter_bbox_state, td_pr_results_state] + all_fields,
+            outputs=[td_noise_bbox_state, td_emitter_bbox_state, td_frame_image, td_noise_status,
+                     td_bg_min, td_bg_max, td_noise_off_min, td_noise_off_max, td_sig_min, td_sig_max],
         )
         td_update_preview_btn.click(
             fn=on_td_update_preview, inputs=[td_pr_results_state, td_frame_state] + all_fields,
