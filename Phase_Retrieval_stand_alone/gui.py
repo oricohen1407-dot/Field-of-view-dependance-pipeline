@@ -598,6 +598,24 @@ def fields_to_config(
     )
 
 
+def _load_pr_results_and_status():
+    """Loads Phase Retrieval's saved results (RESULTS_DIR/results.json + phase_mask.npy) if
+    present -- shared by GUI startup (auto-load the latest finished calibration into the
+    Generate Training Data tab) and the manual "Load Phase Retrieval Results" button (refresh
+    after running a new calibration in the same session)."""
+    # results.json/phase_mask.npy are written non-atomically (plain json.dump/np.save, no
+    # temp-file+rename) -- a load landing mid-write could hit a truncated/locked file.
+    try:
+        results = app_utils.load_phase_retrieval_results(str(RESULTS_DIR))
+    except Exception as exc:
+        return None, f"[ERROR] Could not load Phase Retrieval results: {exc}"
+    if results is None:
+        return None, "No Phase Retrieval results found yet — run Phase Retrieval first (Configure + Run tabs)."
+    status = (f"Loaded: d={results['d_um']:.1f} um, g_sigma={results['g_sigma']:.3f}, "
+              f"nfp_offset={results['nfp_offset_um']:.3f} um, nfp_range={results['nfp_range_um']:.2f} um.")
+    return results, status
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 def build_demo() -> gr.Blocks:
@@ -607,6 +625,10 @@ def build_demo() -> gr.Blocks:
             defaults = config_to_fields(Config.load(DEFAULT_SAVE_PATH))
         except Exception:
             pass
+    # Auto-load whatever Phase Retrieval results already exist on disk (RESULTS_DIR), so the
+    # Generate Training Data tab starts pre-loaded with the latest finished calibration instead
+    # of requiring a manual "Load Phase Retrieval Results" click every time the app is opened.
+    initial_pr_results, initial_pr_status = _load_pr_results_and_status()
 
     with gr.Blocks(title="DeepSTORM3D — FOV-dependance") as demo:
         gr.HTML(f"<style>{CRITICAL_CSS}</style>")
@@ -836,10 +858,10 @@ def build_demo() -> gr.Blocks:
                 with gr.Row(equal_height=True):
                     td_load_pr_btn = gr.Button("Load Phase Retrieval Results")
                     td_pr_status = gr.Textbox(
-                        show_label=False, interactive=False,
+                        show_label=False, interactive=False, value=initial_pr_status,
                         placeholder="Click to load the latest fitted d / g_sigma / NFP offset / phase mask.",
                     )
-                td_pr_results_state = gr.State(None)
+                td_pr_results_state = gr.State(initial_pr_results)
 
                 gr.Markdown(
                     "### 2. Upload an experimental frame and mark two reference regions\n"
@@ -1413,17 +1435,7 @@ def build_demo() -> gr.Blocks:
         # ── Generate Training Data tab handlers ─────────────────────────────────
 
         def on_td_load_pr():
-            # results.json/phase_mask.npy are written non-atomically (plain json.dump/np.save,
-            # no temp-file+rename) — a click landing mid-write could hit a truncated/locked file.
-            try:
-                results = app_utils.load_phase_retrieval_results(str(RESULTS_DIR))
-            except Exception as exc:
-                return None, f"[ERROR] Could not load Phase Retrieval results: {exc}"
-            if results is None:
-                return None, "No Phase Retrieval results found yet — run Phase Retrieval first (Configure + Run tabs)."
-            status = (f"Loaded: d={results['d_um']:.1f} um, g_sigma={results['g_sigma']:.3f}, "
-                      f"nfp_offset={results['nfp_offset_um']:.3f} um, nfp_range={results['nfp_range_um']:.2f} um.")
-            return results, status
+            return _load_pr_results_and_status()
 
         def on_td_frame_uploaded(file_path):
             if not file_path:
